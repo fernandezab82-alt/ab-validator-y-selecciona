@@ -1,0 +1,1468 @@
+//@version=6
+// AB-Validator (vs v1.4) - panel compacto para acciones, ETF y ADR en EE.UU.
+// Revision visual: panel agrupado; motor, niveles, filtros y alertas v1.4 intactos.
+// Modo estricto. Parametros pendientes de validar en cada activo.
+// v1.4: oportunidades con ID unico, bloqueos independientes y liquidez.
+// Resultados: snapshot observado desde la carga; no reconstruye candidatos
+// historicos de acciones/ADR. Al recargar comienza una nueva cobertura.
+// ETFs exentos de resultados. Solo mercados US verificados, cotizacion USD.
+// Referencias tecnicas: tradingview.com/pine-script-reference/v6/
+// y tradingview.com/pine-script-docs/concepts/other-timeframes-and-data/
+// Autor: Abdias Fernandez (apoyado con IA).
+// Confirmacion de implementacion: no se copiaron bloques de codigo de
+// Signal Forge de LuxAlgo. Se reviso como referencia funcional y se
+// implementaron nuevamente los modulos de AB-Validator C-P.
+// Se conserva la licencia indicada; esta declaracion no la modifica.
+// CC BY-NC-SA 4.0: https://creativecommons.org/licenses/by-nc-sa/4.0/
+// No incorpora ejecucion de ordenes ni estadisticas de contratos de opciones.
+// Senales y eventos se notifican al cierre de 5m. Invalidacion por toque
+// del nivel en una vela POSTERIOR a la emision; no es un stop ejecutado.
+indicator("AB-Validator (vs v1.4)", overlay = true, max_labels_count = 200, max_bars_back = 500, dynamic_requests = true)
+
+const string TZ = "America/New_York"
+const string G_SESSION = "01 - Horario y noticias"
+const string G_NEWS = "01B - Noticias NY - RECREAR ALERTAS al cambiar"
+const string G_TREND = "02 - Tendencia y estructura"
+const string G_MOM = "03 - Momentum y volumen"
+const string G_SETUP = "04 - Nivel y reaccion"
+const string G_LIFE = "05 - Validez del candidato"
+const string G_VISUAL = "06 - Panel y alertas"
+const string G_DIAG = "07 - Diagnostico del modo estricto"
+const int GATE_COUNT = 20
+const string G_LIQ = "01D - Mercado y liquidez"
+
+startHour = input.int(9, "Inicio: hora NY", minval = 9, maxval = 15, inline = "start", group = G_SESSION, display = display.none)
+startMinute = input.int(45, "Minuto", minval = 0, maxval = 59, inline = "start", group = G_SESSION, display = display.none)
+endHour = input.int(15, "Fin nuevas senales: hora NY", minval = 10, maxval = 16, inline = "end", group = G_SESSION, display = display.none)
+endMinute = input.int(0, "Minuto", minval = 0, maxval = 59, inline = "end", group = G_SESSION, display = display.none)
+closeBufferMinutes = input.int(60, "Margen minimo antes del cierre regular (minutos)", minval = 0, maxval = 180, group = G_SESSION, tooltip = "El corte efectivo es el menor entre la hora elegida y el cierre RTH informado por TradingView menos este margen. Revisar los dias de cierre anticipado con el proveedor de datos.", display = display.none)
+premarketMode = input.string("Exigir", "Premarket: uso en setups", options = ["Exigir", "Usar si existe", "No usar"], group = G_SESSION, tooltip = "Exigir mantiene el modo estricto original. Usar si existe permite setups sin PM disponible. No usar excluye PM como origen de setups. En TODOS los modos, los niveles PM conocidos siguen contando como primer obstaculo para objetivo/RR. Sin datos no significa sin negociacion.", display = display.none)
+minimumDailyVolume = input.float(1000000, "Liquidez: volumen diario medio minimo (acciones)", minval = 1, step = 100000, group = G_LIQ, tooltip = "Promedio de las 20 sesiones RTH cerradas anteriores; excluye hoy. Volumen del proveedor, no necesariamente consolidado. Parametro inicial sin validar. No demuestra liquidez de las opciones.", display = display.none)
+minimumSharePrice = input.float(5.0, "Liquidez: precio minimo (USD)", minval = 0.01, step = 0.5, group = G_LIQ, tooltip = "Se compara con el cierre confirmado de 5m. Parametro inicial sin validar. Se requiere cotizacion USD.", display = display.none)
+// Campos de texto deliberados: input.time() presenta la zona del GRAFICO.
+// Aqui la fecha y la hora se convierten explicitamente con America/New_York.
+blockDay = input.bool(false, "Bloquear fecha completa por noticia", group = G_NEWS, display = display.none)
+blockedDateNY = input.string("2026-10-16", "Fecha NY: YYYY-MM-DD", group = G_NEWS, tooltip = "Ejemplo, no noticia real. America/New_York; RECREAR las alertas despues de cambiar estos ajustes.", display = display.none)
+event1Enabled = input.bool(false, "Evento 1", inline = "ev1", group = G_NEWS, display = display.none)
+event1NY = input.string("2026-10-16 08:30", "Fecha/hora NY", inline = "ev1", group = G_NEWS, tooltip = "Formato exacto YYYY-MM-DD HH:mm, reloj de 24 horas de Nueva York. Cambio de horario de verano automatico. No depende de la zona del grafico. Ejemplo, no calendario real. RECREAR ALERTAS al modificar.", display = display.none)
+event2Enabled = input.bool(false, "Evento 2", inline = "ev2", group = G_NEWS, display = display.none)
+event2NY = input.string("2026-10-16 10:00", "Fecha/hora NY", inline = "ev2", group = G_NEWS, tooltip = "YYYY-MM-DD HH:mm en America/New_York. RECREAR ALERTAS al modificar.", display = display.none)
+event3Enabled = input.bool(false, "Evento 3", inline = "ev3", group = G_NEWS, display = display.none)
+event3NY = input.string("2026-10-16 14:00", "Fecha/hora NY", inline = "ev3", group = G_NEWS, tooltip = "YYYY-MM-DD HH:mm en America/New_York. RECREAR ALERTAS al modificar.", display = display.none)
+event4Enabled = input.bool(false, "Evento 4", inline = "ev4", group = G_NEWS, display = display.none)
+event4NY = input.string("2026-10-16 14:30", "Fecha/hora NY", inline = "ev4", group = G_NEWS, tooltip = "YYYY-MM-DD HH:mm en America/New_York. RECREAR ALERTAS al modificar.", display = display.none)
+event5Enabled = input.bool(false, "Evento 5", inline = "ev5", group = G_NEWS, display = display.none)
+event5NY = input.string("2026-10-19 08:30", "Fecha/hora NY", inline = "ev5", group = G_NEWS, tooltip = "YYYY-MM-DD HH:mm en America/New_York. RECREAR ALERTAS al modificar.", display = display.none)
+event6Enabled = input.bool(false, "Evento 6", inline = "ev6", group = G_NEWS, display = display.none)
+event6NY = input.string("2026-10-19 10:00", "Fecha/hora NY", inline = "ev6", group = G_NEWS, tooltip = "YYYY-MM-DD HH:mm en America/New_York. RECREAR ALERTAS al modificar.", display = display.none)
+minutesBefore = input.int(30, "Minutos antes (los 6 eventos)", minval = 0, maxval = 240, inline = "event", group = G_NEWS, display = display.none)
+minutesAfter = input.int(30, "Despues", minval = 0, maxval = 240, inline = "event", group = G_NEWS, display = display.none)
+
+dailyFastLen = input.int(20, "EMA diaria rapida", minval = 2, maxval = 100, inline = "daily", group = G_TREND, display = display.none)
+dailySlowLen = input.int(50, "Lenta", minval = 3, maxval = 250, inline = "daily", group = G_TREND, display = display.none)
+hourFastLen = input.int(20, "EMA 1h rapida", minval = 2, maxval = 100, inline = "hour", group = G_TREND, display = display.none)
+hourSlowLen = input.int(50, "Lenta", minval = 3, maxval = 250, inline = "hour", group = G_TREND, display = display.none)
+fastLen = input.int(8, "EMA 5m rapida", minval = 2, maxval = 100, inline = "five", group = G_TREND, display = display.none)
+slowLen = input.int(20, "Lenta", minval = 3, maxval = 200, inline = "five", group = G_TREND, display = display.none)
+useStructure = input.bool(true, "Exigir HH/HL o LH/LL en 1h", group = G_TREND, tooltip = "Dos maximos y dos minimos pivote confirmados. Puede restringir mucho las senales.", display = display.none)
+useDailyStructure = input.bool(false, "Exigir HH/HL o LH/LL en diario", group = G_TREND, tooltip = "Opcional y apagado por defecto. Compara dos maximos y dos minimos pivote diarios confirmados, disponibles solo tras el cierre diario.", display = display.none)
+dailyPivotLen = input.int(2, "Pivote diario: barras por lado", minval = 1, maxval = 10, group = G_TREND, display = display.none)
+pivotLen = input.int(2, "Pivote: barras por lado (5m/1h)", minval = 1, maxval = 5, group = G_TREND, display = display.none)
+useCrossETF = input.bool(true, "Veto si el ETF de referencia esta claramente en contra", group = G_TREND, tooltip = "Automatico: QQQ para SPY; SPY para QQQ y para las demas acciones/ETF/ADR. Oposicion: VWAP y EMA de 5m, y EMA de 1h, todos contrarios. Datos atrasados o no sincronizados bloquean si este filtro esta activo.", display = display.none)
+crossETFInput = input.symbol("", "ETF de referencia (vacio = automatico)", group = G_TREND, tooltip = "Vacio: SPY confirma las acciones/ETF/ADR; para SPY se usa QQQ. Puede elegir otro ETF cotizado en EE.UU., por ejemplo QQQ o uno sectorial. No elegir el propio activo, aunque sea otro proveedor. El panel informa la ultima vela recibida al cierre de 5m.", display = display.none)
+
+rciLen = input.int(9, "RCI: longitud en 5m", minval = 3, maxval = 30, group = G_MOM, display = display.none)
+rciExtreme = input.float(80, "RCI: umbral extremo +/-", minval = 40, maxval = 95, step = 5, group = G_MOM, display = display.none)
+rciWindow = input.int(3, "Recuperacion RCI valida: velas previas", minval = 0, maxval = 12, group = G_MOM, tooltip = "CALL: cruce ascendente de -umbral. PUT: cruce descendente de +umbral. Se acepta en la vela actual o las N anteriores de esta sesion. No se arrastra de ayer.", display = display.none)
+rvolDays = input.int(20, "RVOL: muestras anteriores del mismo horario", minval = 5, maxval = 60, group = G_MOM, display = display.none)
+rvolMinSamples = input.int(20, "RVOL: minimo de muestras por horario", minval = 3, maxval = 60, group = G_MOM, tooltip = "Se buscan las ultimas N muestras del mismo tramo de 5m, excluyendo hoy, hasta 2*N sesiones atras para omitir sesiones cortas o datos ausentes. Se muestra n/N; el minimo se limita al total configurado.", display = display.none)
+rvolThreshold = input.float(1.2, "RVOL minimo", minval = 0.1, maxval = 5, step = 0.1, group = G_MOM, display = display.none)
+atrLen = input.int(14, "ATR en 5m RTH", minval = 2, maxval = 100, group = G_MOM, tooltip = "Solo barras regulares. El true range de la apertura SI incluye el gap frente al cierre regular anterior.", display = display.none)
+
+enableRetest = input.bool(true, "Ruptura y retesteo", group = G_SETUP, display = display.none)
+enableRejection = input.bool(false, "Rechazo con mecha (setup separado)", group = G_SETUP, display = display.none)
+retestBars = input.int(3, "Maximo de velas posteriores para retesteo", minval = 1, maxval = 10, group = G_SETUP, display = display.none)
+levelBufferATR = input.float(0.1, "Margen/tolerancia del nivel en ATR", minval = 0, maxval = 1, step = 0.05, group = G_SETUP, display = display.none)
+wickRatio = input.float(1.5, "Rechazo: mecha / cuerpo minimo", minval = 1, maxval = 5, step = 0.25, group = G_SETUP, display = display.none)
+minimumRR = input.float(1.5, "Espacio minimo / riesgo", minval = 1, maxval = 5, step = 0.1, group = G_SETUP, display = display.none)
+useMinTargetATR = input.bool(false, "Exigir distancia minima al primer objetivo en ATR", group = G_SETUP, tooltip = "Apagado por defecto. El primer obstaculo sigue siendo el objetivo usado para espacio y RR; nunca se salta para aprobar el filtro.", display = display.none)
+minimumTargetATR = input.float(0.5, "Distancia minima objetivo / ATR", minval = 0.1, maxval = 5, step = 0.1, group = G_SETUP, tooltip = "Parametro inicial sin validar. Usa ATR de 5m RTH al emitir, que queda congelado junto con entrada y objetivo.", display = display.none)
+allowProjection = input.bool(false, "Si no hay nivel objetivo: proyectar rango 15m", group = G_SETUP, tooltip = "Apagado: ESPERAR si no hay objetivo conocido. Encendido: objetivo a una altura del rango inicial desde la entrada; se marca PROY, no resistencia/soporte observado.", display = display.none)
+
+maxAdvanceATR = input.float(0.5, "Expira al avanzar a favor mas de ATR", minval = 0.1, maxval = 3, step = 0.1, group = G_LIFE, display = display.none)
+maxAgeBars = input.int(3, "Expira tras N velas RTH posteriores", minval = 1, maxval = 12, group = G_LIFE, display = display.none)
+maxDailySignals = input.int(2, "Maximo de candidatos por activo y dia", minval = 1, maxval = 10, group = G_LIFE, display = display.none)
+cooldownBars = input.int(3, "Pausa tras invalidacion/objetivo/expiracion: velas", minval = 1, maxval = 12, group = G_LIFE, display = display.none)
+cancelOnTrendLoss = input.bool(true, "Expirar si pierde tendencia/EMA/VWAP o veto ETF", group = G_LIFE, tooltip = "RCI, volumen y reaccion se guardan al emitir; no se exige repetir esos eventos en cada vela.", display = display.none)
+
+showPanel = input.bool(true, "Mostrar panel", group = G_VISUAL, display = display.none)
+panelView = input.string("Compacto", "Vista del panel", options = ["Compacto", "Detallado"], group = G_VISUAL, tooltip = "Compacto: nueve bloques, estado y niveles. Cada bloque exige TODOS sus filtros activos. Detallado conserva las veinte condiciones individuales. Solo cambia la presentacion.", display = display.none)
+panelLocation = input.string("Arriba derecha", "Ubicacion", options = ["Arriba derecha", "Abajo derecha", "Abajo izquierda"], group = G_VISUAL, display = display.none)
+showLevels = input.bool(true, "Mostrar entrada, invalidacion y objetivo activos", group = G_VISUAL, display = display.none)
+showBackground = input.bool(true, "Fondo tenue mientras el candidato es valido", group = G_VISUAL, display = display.none)
+dynamicAlerts = input.bool(true, "Alertas dinamicas con niveles y motivo", group = G_VISUAL, tooltip = "Crear una alerta de 'Cualquier llamada a alert()'. Tambien hay cinco condiciones individuales. Tras cambiar ajustes, especialmente noticias, RECREAR las alertas.", display = display.none)
+diagnosticMode = input.bool(false, "Mostrar tabla de diagnostico", group = G_DIAG, tooltip = "No relaja filtros. N: cierres RTH en horario; ND: N con dataGate. S: velas rawLong/rawShort; SD: S con dataGate. Direccionales SOLO sobre S/SD. %ND muestra incidencia setup+filtro sobre ND. Casi: vela raw con exactamente un gate activo falso; OFF no cuenta. Una misma ruptura puede tener varias velas raw. El motor condiciona raw tambien a premarket/resultados/liquidez. Bloqueos propios y embudo se muestran en la otra vista. No es un backtest ni tasa de acierto.", display = display.none)
+diagnosticView = input.string("Embudo y bloqueos", "Vista del diagnostico", options = ["Embudo y bloqueos", "Filtros y casi senales"], group = G_DIAG, tooltip = "Ambas vistas conservan los mismos contadores y senales. Embudo: oportunidades unicas por ruptura, descartes aparte. Filtros: porcentajes por vela raw y casi senales originales.", display = display.none)
+diagnosticLocation = input.string("Arriba izquierda", "Ubicacion diagnostico", options = ["Arriba izquierda", "Abajo izquierda", "Arriba derecha", "Abajo derecha"], group = G_DIAG, tooltip = "Elegir una esquina distinta a la del panel principal.", display = display.none)
+
+f_key(int t) =>
+    year(t, TZ) * 10000 + month(t, TZ) * 100 + dayofmonth(t, TZ)
+
+f_price(float x) =>
+    na(x) ? "N/D" : str.tostring(x, format.mintick)
+
+f_stamp(int t) =>
+    na(t) ? "N/D" : str.format_time(t, "MM-dd HH:mm", TZ)
+
+f_number(float x) =>
+    na(x) ? "N/D" : str.tostring(x, "#.00")
+
+f_rate(int passed, int total) =>
+    total > 0 ? str.tostring(100.0 * passed / total, "#.0") + "%" : "N/D"
+
+// Valida formato y calendario. Rechaza fechas normalizadas (p.ej. febrero 30).
+f_eventNY(string value, bool enabled) =>
+    int result = na
+    if enabled
+        bool formatOK = str.length(value) == 16 and str.substring(value, 4, 5) == "-" and str.substring(value, 7, 8) == "-" and str.substring(value, 10, 11) == " " and str.substring(value, 13, 14) == ":"
+        string digits = "0123456789"
+        if formatOK
+            for i = 0 to 15
+                if i != 4 and i != 7 and i != 10 and i != 13
+                    formatOK := formatOK and str.contains(digits, str.substring(value, i, i + 1))
+        if not formatOK
+            runtime.error("Noticias: usar YYYY-MM-DD HH:mm, hora de Nueva York: " + value)
+        int y = int(str.tonumber(str.substring(value, 0, 4)))
+        int m = int(str.tonumber(str.substring(value, 5, 7)))
+        int d = int(str.tonumber(str.substring(value, 8, 10)))
+        int h = int(str.tonumber(str.substring(value, 11, 13)))
+        int n = int(str.tonumber(str.substring(value, 14, 16)))
+        if y < 2000 or y > 2100 or m < 1 or m > 12 or d < 1 or d > 31 or h < 0 or h > 23 or n < 0 or n > 59
+            runtime.error("Noticias: fecha/hora NY fuera de rango: " + value)
+        result := timestamp(TZ, y, m, d, h, n)
+        if year(result, TZ) != y or month(result, TZ) != m or dayofmonth(result, TZ) != d or hour(result, TZ) != h or minute(result, TZ) != n
+            runtime.error("Noticias: fecha/hora inexistente en Nueva York: " + value)
+    result
+
+// INTEGRACION: colocar junto a los otros inputs, despues de TZ.
+const string G_EARN = "01C - Resultados - RECREAR ALERTAS al cambiar"
+enableEarningsBlock = input.bool(true, "Bloquear resultados: dia y siguiente sesion", group = G_EARN, tooltip = "Solo acciones y ADR; ETF N/A. La fecha automatica es un snapshot obtenido al cargar, no un calendario historico ni una actualizacion continua. Sin fecha util o sin calendario: ESPERAR. Historial anterior a la observacion: no verificable y bloqueado. RECREAR las alertas despues de cambios o para actualizar el snapshot.", display = display.none)
+manualEarningsDateNY = input.string("", "Fecha manual de respaldo NY: YYYY-MM-DD", group = G_EARN, tooltip = "Vacio = sin respaldo. Fecha del reporte del activo de ESTE grafico, en Nueva York. Se usa si la automatica falta o ya quedo obsoleta. Su ventana conocida se respeta siempre, incluso si la automatica ya cambio al proximo trimestre. No certifica la ausencia de otros reportes historicos. RECREAR ALERTAS despues de cambiar.", display = display.none)
+manualEarningsSymbol = input.symbol("", "Simbolo al que pertenece la fecha manual", group = G_EARN, tooltip = "Obligatorio si ingresa una fecha manual. La fecha solo se usa cuando el simbolo coincide con el activo del grafico, para evitar reutilizarla al cambiar de accion. RECREAR ALERTAS al cambiar.", display = display.none)
+
+
+// INTEGRACION: colocar despues de f_key() y f_eventNY().
+// sessionKey y previousSessionKey proceden exclusivamente del calendario SPY.
+// Incluye el dia reportado y la sesion siguiente realmente observada.
+// Si el reporte cae sin sesion, incluye la primera sesion posterior.
+f_earningsWindow(int reportKey, int sessionKey, int previousSessionKey) =>
+    not na(reportKey) and not na(sessionKey) and not na(previousSessionKey) and (sessionKey == reportKey or (previousSessionKey <= reportKey and reportKey < sessionKey))
+
+// Diferencia de FECHAS civiles NY: no cuenta sesiones bursatiles.
+// Reanclar esas fechas en UTC evita errores de una hora por cambios DST.
+f_earningsCalendarDays(int fromStamp, int toStamp) =>
+    int result = na
+    if not na(fromStamp) and not na(toStamp)
+        int fromCivil = timestamp("UTC", year(fromStamp, TZ), month(fromStamp, TZ), dayofmonth(fromStamp, TZ), 0, 0)
+        int toCivil = timestamp("UTC", year(toStamp, TZ), month(toStamp, TZ), dayofmonth(toStamp, TZ), 0, 0)
+        result := int(math.round((toCivil - fromCivil) / 86400000.0))
+    result
+
+
+f_gateDisabled(int i) =>
+    (i == 4 and not useDailyStructure) or (i == 6 and not useStructure) or (i == 11 and not useCrossETF) or (i == 14 and not useMinTargetATR) or (i == 17 and premarketMode != "Exigir") or (i == 18 and (not enableEarningsBlock or syminfo.type == "fund"))
+
+f_directionalGate(int i) =>
+    (i >= 3 and i <= 11) or i == 13 or i == 14
+
+// Lista permitida: excluye cripto, futuros, forex, indices y derivados.
+// country es el mercado/proveedor de cotizacion, no el domicilio del emisor.
+// Lista cerrada de identificadores admitidos. Un proveedor desconocido se
+// rechaza explicitamente: no basta con que el pais sea US para excluir OTC.
+f_supportedVenue(string prefix) =>
+    prefix == "NASDAQ" or prefix == "NYSE" or prefix == "AMEX" or prefix == "CBOE" or prefix == "BATS"
+
+f_otcVenue(string prefix) =>
+    str.contains(str.upper(prefix), "OTC") or str.contains(str.upper(prefix), "PINK")
+
+f_supportedAsset(string assetType, string marketCountry) =>
+    (assetType == "stock" or assetType == "fund" or assetType == "dr") and marketCountry == "US"
+
+// Spearman con rangos medios para precios empatados.
+// Offset cero = barra mas nueva: una subida monotona produce +100.
+f_rci(float src, int length) =>
+    float result = na
+    if not na(src[length - 1])
+        float meanRank = (length - 1) / 2.0
+        float covariance = 0.0
+        float priceVariance = 0.0
+        float timeVariance = 0.0
+        for i = 0 to length - 1
+            float lower = 0.0
+            float equal = 0.0
+            for j = 0 to length - 1
+                lower += src[j] < src[i] ? 1.0 : 0.0
+                equal += src[j] == src[i] ? 1.0 : 0.0
+            float priceRank = lower + (equal - 1.0) / 2.0
+            float timeRank = length - 1 - i
+            float x = priceRank - meanRank
+            float y = timeRank - meanRank
+            covariance += x * y
+            priceVariance += x * x
+            timeVariance += y * y
+        result := priceVariance > 0 and timeVariance > 0 ? 100 * covariance / math.sqrt(priceVariance * timeVariance) : 0
+    result
+
+// Esta funcion se ejecuta DENTRO del contexto de 5m de sesion regular.
+f_regular5() =>
+    int key = f_key(time)
+    var int previousKey = na
+    bool newDay = na(previousKey) or key != previousKey
+    var int sequence = 0
+    sequence += 1
+    var float pv = 0.0
+    var float vv = 0.0
+    var float orbHigh = na
+    var float orbLow = na
+    var int orbCount = 0
+    var float dayHigh = na
+    var float dayLow = na
+    var int lastLongRecovery = na
+    var int lastShortRecovery = na
+    int slots = 78
+    int rows = rvolDays * 2 + 1
+    var array<float> slotVolumes = array.new_float(rows * slots, na)
+    var int row = -1
+    if newDay
+        previousKey := key
+        pv := 0.0
+        vv := 0.0
+        orbHigh := na
+        orbLow := na
+        orbCount := 0
+        dayHigh := na
+        dayLow := na
+        lastLongRecovery := na
+        lastShortRecovery := na
+        row := (row + 1) % rows
+        for s = 0 to slots - 1
+            array.set(slotVolumes, row * slots + s, na)
+    float previousDayHigh = dayHigh
+    float previousDayLow = dayLow
+    int slot = int(math.floor((hour(time, TZ) * 60 + minute(time, TZ) - 570) / 5.0))
+    if slot >= 0 and slot <= 2
+        orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+        orbLow := na(orbLow) ? low : math.min(orbLow, low)
+        orbCount += 1
+    dayHigh := na(dayHigh) ? high : math.max(dayHigh, high)
+    dayLow := na(dayLow) ? low : math.min(dayLow, low)
+    if not na(volume)
+        pv += hlc3 * volume
+        vv += volume
+    float vwapValue = vv > 0 ? pv / vv : na
+    float historicalVolume = 0.0
+    int volumeSamples = 0
+    if slot >= 0 and slot < slots
+        for d = 1 to rvolDays * 2
+            int pastRow = (row - d + rows) % rows
+            float oldVolume = array.get(slotVolumes, pastRow * slots + slot)
+            if not na(oldVolume) and volumeSamples < rvolDays
+                historicalVolume += oldVolume
+                volumeSamples += 1
+        array.set(slotVolumes, row * slots + slot, volume)
+    float relativeVolume = volumeSamples > 0 and historicalVolume > 0 ? volume / (historicalVolume / volumeSamples) : na
+    float atrValue = ta.atr(atrLen)
+    float fastEMA = ta.ema(close, fastLen)
+    float slowEMA = ta.ema(close, slowLen)
+    float rciValue = f_rci(close, rciLen)
+    bool recoveryUp = ta.crossover(rciValue, -rciExtreme)
+    bool recoveryDown = ta.crossunder(rciValue, rciExtreme)
+    if recoveryUp
+        lastLongRecovery := sequence
+    if recoveryDown
+        lastShortRecovery := sequence
+    bool longRCI = not na(lastLongRecovery) and sequence - lastLongRecovery <= rciWindow and rciValue > -rciExtreme and (na(lastShortRecovery) or lastLongRecovery > lastShortRecovery)
+    bool shortRCI = not na(lastShortRecovery) and sequence - lastShortRecovery <= rciWindow and rciValue < rciExtreme and (na(lastLongRecovery) or lastShortRecovery > lastLongRecovery)
+    var float lastPivotHigh = na
+    var float lastPivotLow = na
+    float knownPivotHigh = lastPivotHigh
+    float knownPivotLow = lastPivotLow
+    float newPH = ta.pivothigh(high, pivotLen, pivotLen)
+    float newPL = ta.pivotlow(low, pivotLen, pivotLen)
+    if not na(newPH)
+        lastPivotHigh := newPH
+    if not na(newPL)
+        lastPivotLow := newPL
+    [time, time_close, key, sequence, close, open, high, low, close[1], atrValue, fastEMA, slowEMA, rciValue, longRCI, shortRCI, vwapValue, relativeVolume, volumeSamples, orbHigh, orbLow, orbCount == 3, previousDayHigh, previousDayLow, knownPivotHigh, knownPivotLow, session.islastbar_regular]
+
+// EMA y pivotes solo con barras RTH de 60 minutos COMPLETOS.
+// La fraccion final de 30m no modifica las EMAs ni los pivotes.
+f_closedHour() =>
+    var float fastEMA = na
+    var float slowEMA = na
+    var float lastClose = na
+    var int lastTimestamp = na
+    var int count = 0
+    var array<float> highs = array.new_float()
+    var array<float> lows = array.new_float()
+    var float lastHigh = na
+    var float previousHigh = na
+    var float lastLow = na
+    var float previousLow = na
+    if time_close - time == 60 * 60 * 1000
+        count += 1
+        fastEMA := na(fastEMA) ? close : fastEMA + 2.0 / (hourFastLen + 1) * (close - fastEMA)
+        slowEMA := na(slowEMA) ? close : slowEMA + 2.0 / (hourSlowLen + 1) * (close - slowEMA)
+        lastClose := close
+        lastTimestamp := time_close
+        array.push(highs, high)
+        array.push(lows, low)
+        int needed = pivotLen * 2 + 1
+        if array.size(highs) > needed
+            array.shift(highs)
+            array.shift(lows)
+        if array.size(highs) == needed
+            float centerHigh = array.get(highs, pivotLen)
+            float centerLow = array.get(lows, pivotLen)
+            bool isHigh = true
+            bool isLow = true
+            for i = 0 to needed - 1
+                if i != pivotLen
+                    isHigh := isHigh and centerHigh > array.get(highs, i)
+                    isLow := isLow and centerLow < array.get(lows, i)
+            if isHigh
+                previousHigh := lastHigh
+                lastHigh := centerHigh
+            if isLow
+                previousLow := lastLow
+                lastLow := centerLow
+    [lastClose[1], fastEMA[1], slowEMA[1], lastHigh[1], previousHigh[1], lastLow[1], previousLow[1], lastTimestamp[1], count[1]]
+
+f_closedDaily() =>
+    float fastEMA = ta.ema(close, dailyFastLen)
+    float slowEMA = ta.ema(close, dailySlowLen)
+    float ph = ta.pivothigh(high, dailyPivotLen, dailyPivotLen)
+    float pl = ta.pivotlow(low, dailyPivotLen, dailyPivotLen)
+    var float lastHigh = na
+    var float previousHigh = na
+    var float lastLow = na
+    var float previousLow = na
+    if not na(ph)
+        previousHigh := lastHigh
+        lastHigh := ph
+    if not na(pl)
+        previousLow := lastLow
+        lastLow := pl
+    // Solo time_close y fecha actuales: metadatos del horario, no precios futuros.
+    [close[1], fastEMA[1], slowEMA[1], high[1], low[1], time_close[1], bar_index[1] + 1, time_close, f_key(time), lastHigh[1], previousHigh[1], lastLow[1], previousLow[1]]
+
+// Se solicita horario extendido aunque el grafico muestre solo RTH.
+// Nunca reutiliza el PM de otra fecha.
+f_premarket() =>
+    int key = f_key(time)
+    var int oldKey = na
+    var float pmHigh = na
+    var float pmLow = na
+    if na(oldKey) or oldKey != key
+        oldKey := key
+        pmHigh := na
+        pmLow := na
+    int minuteNY = hour(time, TZ) * 60 + minute(time, TZ)
+    if minuteNY >= 240 and minuteNY < 570
+        pmHigh := na(pmHigh) ? high : math.max(pmHigh, high)
+        pmLow := na(pmLow) ? low : math.min(pmLow, low)
+    [pmHigh, pmLow, key]
+
+f_cross5() =>
+    int key = f_key(time)
+    var int previousKey = na
+    var float pv = 0.0
+    var float vv = 0.0
+    if na(previousKey) or key != previousKey
+        previousKey := key
+        pv := 0.0
+        vv := 0.0
+    if not na(volume)
+        pv += hlc3 * volume
+        vv += volume
+    [close, ta.ema(close, fastLen), ta.ema(close, slowLen), vv > 0 ? pv / vv : na, time, time_close, syminfo.type, syminfo.country, syminfo.ticker, syminfo.prefix, syminfo.currency]
+
+f_addLevel(array<float> values, array<string> names, float value, string name) =>
+    if not na(value)
+        bool duplicate = false
+        if array.size(values) > 0
+            for i = 0 to array.size(values) - 1
+                // Solo igualdad numerica: no fusionar obstaculos distintos.
+                if math.abs(array.get(values, i) - value) <= syminfo.mintick * 0.000001
+                    duplicate := true
+        if not duplicate
+            array.push(values, value)
+            array.push(names, name)
+
+f_nextLevel(array<float> values, array<string> names, float entry, int direction) =>
+    float best = na
+    string bestName = ""
+    if array.size(values) > 0
+        for i = 0 to array.size(values) - 1
+            float level = array.get(values, i)
+            // Incluye tambien un obstaculo situado a un solo tick.
+            float precision = syminfo.mintick * 0.000001
+            bool ahead = direction == 1 ? level > entry + precision : level < entry - precision
+            bool closer = na(best) or (direction == 1 ? level < best : level > best)
+            if ahead and closer
+                best := level
+                bestName := array.get(names, i)
+    [best, bestName]
+
+f_all(array<bool> gates) =>
+    bool pass = true
+    for i = 0 to array.size(gates) - 1
+        pass := pass and array.get(gates, i)
+    pass
+
+f_firstMissing(array<bool> gates, array<string> names) =>
+    string result = "ninguno"
+    for i = 0 to array.size(gates) - 1
+        if not array.get(gates, i) and result == "ninguno"
+            result := array.get(names, i)
+    result
+
+if barstate.isfirst
+    if not chart.is_standard or not timeframe.isminutes or timeframe.multiplier != 5
+        runtime.error("AB-Validator C-P: usar velas normales de 5 minutos.")
+    if not f_supportedAsset(syminfo.type, syminfo.country)
+        runtime.error("AB-Validator C-P v1.4: usar acciones, ETF o ADR cotizados en EE.UU. Tipo recibido: " + syminfo.type + " | Mercado: " + syminfo.country + ". No admite cripto, futuros, forex ni indices.")
+    if f_otcVenue(syminfo.prefix)
+        runtime.error("AB-Validator C-P v1.4: mercado OTC excluido. Proveedor/mercado: " + syminfo.prefix)
+    if not f_supportedVenue(syminfo.prefix)
+        runtime.error("AB-Validator C-P v1.4: mercado/proveedor no verificado: " + syminfo.prefix + ". Admitidos: NASDAQ, NYSE, AMEX, CBOE y BATS. No se presume que un proveedor desconocido excluya OTC.")
+    if syminfo.currency != "USD"
+        runtime.error("AB-Validator C-P v1.4: los umbrales de precio requieren cotizacion en USD. Recibido: " + syminfo.currency)
+    if not enableRetest and not enableRejection
+        runtime.error("Activar al menos ruptura/retesteo o rechazo.")
+    if dailyFastLen >= dailySlowLen or hourFastLen >= hourSlowLen or fastLen >= slowLen
+        runtime.error("La longitud EMA rapida debe ser menor que la lenta.")
+    if startHour * 60 + startMinute >= endHour * 60 + endMinute
+        runtime.error("El inicio debe ser anterior al fin de nuevas senales.")
+
+string regularTicker = ticker.new(syminfo.prefix, syminfo.ticker, session.regular)
+string extendedTicker = ticker.new(syminfo.prefix, syminfo.ticker, session.extended)
+string otherSource = crossETFInput == "" ? (syminfo.ticker == "SPY" ? "NASDAQ:QQQ" : "AMEX:SPY") : crossETFInput
+string otherTicker = ticker.modify(otherSource, session = session.regular)
+if barstate.isfirst and useCrossETF and ticker.standard(otherSource) == ticker.standard(syminfo.tickerid)
+    runtime.error("Elegir un ETF de confirmacion distinto al activo principal.")
+[rTime, rCloseTime, rKey, rSeq, rClose, rOpen, rHigh, rLow, rPreviousClose, rATR, rFast, rSlow, rRCI, rRCILong, rRCIShort, rVWAP, rRVOL, rSamples, orbHigh, orbLow, orbReady, previousHOD, previousLOD, pivot5High, pivot5Low, lastRegularBar] = request.security(regularTicker, "5", f_regular5(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+[dClose, dFast, dSlow, priorHigh, priorLow, dStamp, dCount, sessionCloseTimestamp, sessionDateKey, dHigh, dPreviousHigh, dLow, dPreviousLow] = request.security(regularTicker, "1D", f_closedDaily(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, calc_bars_count = 500)
+[hClose, hFast, hSlow, hHigh, hPreviousHigh, hLow, hPreviousLow, hStamp, hCount] = request.security(regularTicker, "60", f_closedHour(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, calc_bars_count = 1500)
+// AVG20 solo de dias anteriores cerrados; offset antes de lookahead_on.
+[averageDailyVolume, dailyVolumeSamples] = request.security(regularTicker, "1D", [ta.sma(volume, 20)[1], math.sum(not na(volume) ? 1.0 : 0.0, 20)[1]], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, calc_bars_count = 500)
+[pmHigh, pmLow, pmKey] = request.security(extendedTicker, "5", f_premarket(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+[oClose, oFast, oSlow, oVWAP, oTime, oCloseTime, oType, oCountry, oSymbol, oPrefix, oCurrency] = request.security(otherTicker, "5", f_cross5(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+[ohClose, ohFast, ohSlow, ohHigh, ohPreviousHigh, ohLow, ohPreviousLow, ohStamp, ohCount] = request.security(otherTicker, "60", f_closedHour(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, calc_bars_count = 1500)
+
+// Tambien se valida la referencia manual; no se puede introducir un mercado
+// excluido como confirmacion. Se espera a disponer de sus metadatos.
+if useCrossETF and not na(oTime)
+    if oType != "fund" or oCountry != "US" or not f_supportedVenue(oPrefix) or oCurrency != "USD"
+        runtime.error("La referencia debe ser un ETF cotizado en EE.UU. Recibido: " + otherSource + " | Tipo: " + oType + " | Mercado: " + oCountry + "/" + oPrefix + " | Moneda: " + oCurrency)
+    if oSymbol == syminfo.ticker
+        runtime.error("El ETF de referencia no puede ser el propio activo, tampoco desde otro proveedor.")
+
+bool confirmedRTH = barstate.isconfirmed and rTime == time and rCloseTime == time_close
+bool pmReady = pmKey == rKey and not na(pmHigh) and not na(pmLow)
+int closeMinuteNY = hour(rCloseTime, TZ) * 60 + minute(rCloseTime, TZ)
+bool scheduleReady = not na(sessionCloseTimestamp) and sessionDateKey == rKey and f_key(sessionCloseTimestamp - 1) == rKey
+int effectiveStart = math.max(585, startHour * 60 + startMinute)
+int effectiveEnd = scheduleReady ? math.min(endHour * 60 + endMinute, hour(sessionCloseTimestamp, TZ) * 60 + minute(sessionCloseTimestamp, TZ) - closeBufferMinutes) : 0
+string startLabel = str.tostring(int(effectiveStart / 60), "00") + ":" + str.tostring(effectiveStart % 60, "00")
+string endLabel = str.tostring(int(effectiveEnd / 60), "00") + ":" + str.tostring(effectiveEnd % 60, "00")
+bool timeGate = scheduleReady and closeMinuteNY >= effectiveStart and closeMinuteNY <= effectiveEnd and orbReady and not lastRegularBar
+// Reloj del diagnostico: no depende de ORB, noticias, datos de filtros o cupo.
+bool diagnosticWindow = scheduleReady and closeMinuteNY >= effectiveStart and closeMinuteNY <= effectiveEnd and not lastRegularBar
+var int blockedDate = f_eventNY(blockedDateNY + " 00:00", blockDay)
+var array<int> newsEvents = array.from(f_eventNY(event1NY, event1Enabled), f_eventNY(event2NY, event2Enabled), f_eventNY(event3NY, event3Enabled), f_eventNY(event4NY, event4Enabled), f_eventNY(event5NY, event5Enabled), f_eventNY(event6NY, event6Enabled))
+bool blockedByDate = blockDay and f_key(rCloseTime - 1) == f_key(blockedDate)
+bool blockedByEvent = false
+int blockingEvent = na
+int nextNewsEvent = na
+int nextNewsNumber = na
+for i = 0 to array.size(newsEvents) - 1
+    int eventTime = array.get(newsEvents, i)
+    if not na(eventTime)
+        if rCloseTime >= eventTime - minutesBefore * 60000 and rCloseTime <= eventTime + minutesAfter * 60000
+            blockedByEvent := true
+            blockingEvent := eventTime
+        // Solo informativo; timenow NO participa en senales ni estadisticas.
+        if eventTime >= timenow and (na(nextNewsEvent) or eventTime < nextNewsEvent)
+            nextNewsEvent := eventTime
+            nextNewsNumber := i + 1
+bool newsGate = not blockedByDate and not blockedByEvent
+bool dailyReady = dCount >= math.max(dailyFastLen, dailySlowLen) and not na(dFast) and not na(dSlow)
+bool hourReady = hCount >= math.max(hourFastLen, hourSlowLen) and not na(hFast) and not na(hSlow)
+bool crossReady = oTime == time and oCloseTime == time_close and ohCount >= math.max(hourFastLen, hourSlowLen) and not na(oVWAP)
+bool dataGate = scheduleReady and dailyReady and hourReady and rATR > 0 and not na(rRCI) and not na(rVWAP) and (not useCrossETF or crossReady)
+// Protecciones propias: N/D de liquidez/reportes no se oculta en dataGate.
+bool premarketGate = premarketMode != "Exigir" or pmReady
+bool liquidityDataReady = dailyVolumeSamples == 20 and not na(averageDailyVolume) and not na(rClose)
+bool liquidityPriceOK = not na(rClose) and rClose >= minimumSharePrice
+bool liquidityVolumeOK = liquidityDataReady and averageDailyVolume >= minimumDailyVolume
+bool liquidityGate = liquidityDataReady and liquidityPriceOK and liquidityVolumeOK
+string liquidityPanel = not liquidityDataReady ? "Liquidez: N/D (requiere 20 sesiones RTH cerradas)" : "ADV20 " + str.tostring(averageDailyVolume, "#.0") + "/" + str.tostring(minimumDailyVolume, "#.0") + " acciones | C " + f_price(rClose) + "/" + f_price(minimumSharePrice) + " USD | " + (liquidityGate ? "OK" : "BLOQUEO")
+// INTEGRACION: despues de request.security() principal y de las definiciones
+// rKey/rCloseTime/confirmedRTH; antes del motor de candidatos.
+// Requiere TZ, f_key(), f_eventNY(), f_earningsWindow() y los inputs.
+// No modifica dataGate: earningsGate es una condicion operativa separada.
+bool earningsApplies = syminfo.type == "stock" or syminfo.type == "dr"
+bool earningsActive = enableEarningsBlock and earningsApplies
+
+// Datos de calendario, no precios. No se proyecta ninguna sesion futura.
+[earningsSessionOpen, earningsPreviousSessionOpen] = request.security(ticker.new("AMEX", "SPY", session.regular), "1D", [time, time[1]], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+int earningsSessionKey = f_key(earningsSessionOpen)
+int earningsPreviousSessionKey = f_key(earningsPreviousSessionOpen)
+bool earningsCalendarReady = not na(earningsSessionOpen) and not na(earningsPreviousSessionOpen) and earningsSessionKey == rKey and earningsPreviousSessionKey < earningsSessionKey
+
+// Snapshot real obtenido durante ESTA ejecucion. No se retropropaga como
+// prueba de que se conocia el calendario al cerrar barras anteriores.
+var int earningsObservationTimestamp = timenow
+var int earningsAutoSnapshot = earningsApplies ? earnings.future_time : na
+var string earningsManualText = str.trim(manualEarningsDateNY)
+bool earningsManualSymbolMatches = manualEarningsSymbol != "" and ticker.standard(manualEarningsSymbol) == ticker.standard(syminfo.tickerid)
+var int earningsManualParsedTimestamp = f_eventNY(earningsManualText + " 00:00", earningsActive and earningsManualText != "")
+int earningsManualTimestamp = earningsManualSymbolMatches ? earningsManualParsedTimestamp : na
+int earningsAutoKey = f_key(earningsAutoSnapshot)
+int earningsManualKey = f_key(earningsManualTimestamp)
+
+// El dato EPS puede llegar al final del dia o en la primera barra disponible.
+// Se conserva la fecha de RECEPCION en el grafico, no una hora de publicacion
+// que esta API no certifica. La deteccion puede bloquear una sesion extra.
+float earningsReportedEPS = request.earnings(ticker.standard(syminfo.tickerid), earnings.actual, gaps = barmerge.gaps_on, lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
+var int earningsLastReportedBarTime = na
+var int earningsLastReportedKey = na
+if barstate.isconfirmed and earningsApplies and not na(earningsReportedEPS)
+    earningsLastReportedBarTime := time
+    earningsLastReportedKey := f_key(time)
+
+bool earningsAutoWindow = earningsCalendarReady and f_earningsWindow(earningsAutoKey, earningsSessionKey, earningsPreviousSessionKey)
+bool earningsManualWindow = earningsCalendarReady and f_earningsWindow(earningsManualKey, earningsSessionKey, earningsPreviousSessionKey)
+bool earningsReceivedWindow = earningsCalendarReady and f_earningsWindow(earningsLastReportedKey, earningsSessionKey, earningsPreviousSessionKey)
+// Una fecha vieja fuera de su ventana NO se considera cobertura vigente.
+bool earningsAutoUseful = not na(earningsAutoSnapshot) and (earningsAutoKey >= rKey or earningsAutoWindow)
+bool earningsManualUseful = not na(earningsManualTimestamp) and (earningsManualKey >= rKey or earningsManualWindow)
+int earningsSelectedTimestamp = earningsAutoUseful ? earningsAutoSnapshot : earningsManualUseful ? earningsManualTimestamp : na
+string earningsDateSource = earningsAutoUseful ? "AUTO snapshot" : earningsManualUseful ? "MANUAL respaldo" : "N/D (sin fecha vigente)"
+
+bool earningsHistoryUnknown = earningsActive and (na(rCloseTime) or rCloseTime < earningsObservationTimestamp)
+bool earningsMissingDate = earningsActive and not (earningsAutoUseful or earningsManualUseful)
+bool earningsBlockedWindow = earningsActive and (earningsAutoWindow or earningsManualWindow or earningsReceivedWindow)
+bool earningsCalendarMissing = earningsActive and not earningsCalendarReady
+bool earningsGate = not earningsActive or (not earningsHistoryUnknown and not earningsMissingDate and not earningsCalendarMissing and not earningsBlockedWindow)
+
+string earningsWindowSource = earningsAutoWindow ? "fecha AUTO" : earningsManualWindow ? "fecha MANUAL" : earningsReceivedWindow ? "reporte recibido" : ""
+string earningsReason = not earningsApplies ? "N/A (ETF)" : not enableEarningsBlock ? "OFF" : earningsHistoryUnknown ? "Historial de resultados no verificable" : earningsCalendarMissing ? "Calendario RTH SPY N/D o no sincronizado" : earningsBlockedWindow ? "Reporte de resultados: " + earningsWindowSource : earningsMissingDate ? "Fecha resultados N/D u obsoleta; actualizar/recrear alerta" : "Sin bloqueo conocido: " + earningsDateSource
+
+// Solo informativo. timenow no cambia filtros de precio ni reconstruye pasado.
+int earningsDaysCalendar = f_earningsCalendarDays(timenow, earningsSelectedTimestamp)
+string earningsSelectedLabel = na(earningsSelectedTimestamp) ? "N/D" : str.format_time(earningsSelectedTimestamp, "yyyy-MM-dd", TZ)
+string earningsManualLabel = na(earningsManualTimestamp) ? "" : " | respaldo " + str.format_time(earningsManualTimestamp, "yyyy-MM-dd", TZ)
+string earningsObservationLabel = str.format_time(earningsObservationTimestamp, "yyyy-MM-dd HH:mm:ss", TZ)
+string earningsPanel = not earningsApplies ? "Resultados N/A (ETF)" : not enableEarningsBlock ? "Resultados OFF" : earningsReason + " | " + earningsDateSource + " " + earningsSelectedLabel + (na(earningsDaysCalendar) ? "" : " | " + str.tostring(earningsDaysCalendar) + " dias calendario (no sesiones)") + earningsManualLabel
+string earningsCoveragePanel = earningsActive ? "Resultados: historial no verificable; observacion desde " + earningsObservationLabel + " NY; recargar NO reconstruye candidatos anteriores" + (earningsManualText != "" and not earningsManualSymbolMatches ? " | Respaldo ignorado: simbolo no coincide" : "") : not earningsApplies ? "Resultados: ETF N/A" : "Resultados: filtro OFF; no certifica cobertura"
+
+
+bool dailyLong = dClose > dSlow and dFast > dSlow
+bool dailyShort = dClose < dSlow and dFast < dSlow
+bool dailyStructureLong = not useDailyStructure or (not na(dPreviousHigh) and not na(dPreviousLow) and dHigh > dPreviousHigh and dLow > dPreviousLow)
+bool dailyStructureShort = not useDailyStructure or (not na(dPreviousHigh) and not na(dPreviousLow) and dHigh < dPreviousHigh and dLow < dPreviousLow)
+bool hourlyLong = hClose > hFast and hFast > hSlow
+bool hourlyShort = hClose < hFast and hFast < hSlow
+bool structureLong = not useStructure or (not na(hPreviousHigh) and not na(hPreviousLow) and hHigh > hPreviousHigh and hLow > hPreviousLow)
+bool structureShort = not useStructure or (not na(hPreviousHigh) and not na(hPreviousLow) and hHigh < hPreviousHigh and hLow < hPreviousLow)
+bool emaLong = rFast > rSlow and rClose > rFast
+bool emaShort = rFast < rSlow and rClose < rFast
+bool vwapLong = rClose > rVWAP
+bool vwapShort = rClose < rVWAP
+bool otherBearish = crossReady and oClose < oVWAP and oFast < oSlow and ohFast < ohSlow
+bool otherBullish = crossReady and oClose > oVWAP and oFast > oSlow and ohFast > ohSlow
+bool crossLong = not useCrossETF or (crossReady and not otherBearish)
+bool crossShort = not useCrossETF or (crossReady and not otherBullish)
+
+var int activeDirection = 0
+var float signalEntry = na
+var float signalStop = na
+var float signalTarget = na
+var float signalATR = na
+var float signalRR = na
+var float signalTargetATR = na
+var float signalLaterTarget = na
+var string signalLaterName = ""
+var int signalSequence = na
+var int signalTimestamp = na
+var string signalSetup = ""
+var string signalTargetName = ""
+var int activeSessionKey = na
+var int signalsToday = 0
+var int callsToday = 0
+var int putsToday = 0
+var int lastTerminalSequence = na
+var int pendingDirection = 0
+var float pendingLevel = na
+var float pendingATR = na
+var string pendingName = ""
+var int pendingSequence = na
+var float pendingRVOL = na
+var int pendingSamples = 0
+var string lastEvent = "Sin candidatos emitidos"
+var string waitReason = "Esperando un cierre RTH de 5m"
+var string panelTimestamp = "Sin datos"
+var bool panelFrozen = false
+var array<string> gateNames = array.from("Datos/RTH", "Horario y ORB", "Noticias", "Diario EMA", "Estructura diaria", "1h EMA", "Estructura 1h", "5m EMA", "VWAP RTH", "RCI recuperacion", "RVOL ruptura/rechazo", "Otro ETF", "Nivel y reaccion", "Espacio / riesgo", "Distancia objetivo ATR", "Cupo diario", "Pausa / nuevo setup", "Premarket requerido", "Reporte de resultados", "Liquidez")
+var array<bool> panelLong = array.new_bool(GATE_COUNT, false)
+var array<bool> panelShort = array.new_bool(GATE_COUNT, false)
+var array<string> panelDetails = array.new_string(GATE_COUNT, "")
+var int lastCrossOpen = na
+var int lastCrossClose = na
+var string crossStatus = "Sin cierre RTH observado"
+// Acumulados del historial cargado; no se reinician cada sesion.
+var int diagnosticBars = 0
+var int diagnosticDataBars = 0
+var int diagnosticFirst = na
+var int diagnosticLast = na
+var array<int> diagnosticLong = array.new_int(GATE_COUNT, 0)
+var array<int> diagnosticShort = array.new_int(GATE_COUNT, 0)
+var array<int> diagnosticDataLong = array.new_int(GATE_COUNT, 0)
+var array<int> diagnosticDataShort = array.new_int(GATE_COUNT, 0)
+var array<int> diagnosticNearLong = array.new_int(GATE_COUNT, 0)
+var array<int> diagnosticNearShort = array.new_int(GATE_COUNT, 0)
+var int diagnosticNearCalls = 0
+var int diagnosticNearPuts = 0
+var int diagnosticCalls = 0
+var int diagnosticPuts = 0
+var int diagnosticLongSetups = 0
+var int diagnosticShortSetups = 0
+var int diagnosticLongDataSetups = 0
+var int diagnosticShortDataSetups = 0
+var int diagnosticLongDistances = 0
+var int diagnosticShortDistances = 0
+var float diagnosticLongDistanceSum = 0.0
+var float diagnosticShortDistanceSum = 0.0
+var float diagnosticSignalDistanceSum = 0.0
+var float panelLongTargetATR = na
+var float panelShortTargetATR = na
+
+// Oportunidad unica: identidad monotona por registro, no por vela raw.
+// Las fases se observan una vez por ID y NO limitan reevaluaciones del motor.
+var int nextOpportunityId = 0
+var int pendingId = na
+var bool pendingRetested = false
+var bool pendingEvaluated = false
+var array<int> funnelLong = array.new_int(8, 0)
+var array<int> funnelShort = array.new_int(8, 0)
+// 0 registro, 1 toque/retest en plazo, 2 raw evaluado, 3 emitida,
+// 4 fallo, 5 plazo, 6 sistema, 7 cambio de sesion. Solo 3..7 son finales.
+var int diagnosticRejectionCalls = 0
+var int diagnosticRejectionPuts = 0
+var array<string> blockNames = array.from("Premarket requerido", "Reporte: fecha N/D", "Reporte: ventana", "Reporte: historia N/V", "Calendario RTH N/D", "Liquidez: precio", "Liquidez: ADV20", "Liquidez: datos N/D")
+var array<int> blockBars = array.new_int(8, 0)
+var array<int> blockDays = array.new_int(8, 0)
+var array<int> blockLastDay = array.new_int(8, na)
+var int observedSessions = 0
+var bool sessionStartsAtOpen = false
+var int diagnosticSessionDays = 0
+var int diagnosticNoPMDays = 0
+var int lastPMDiagnosticDay = na
+var int diagnosticObservedDays = 0
+var int lastDiagnosticObservedDay = na
+
+f_funnelCount(int direction, int stage) =>
+    if diagnosticMode
+        array<int> counts = direction == 1 ? funnelLong : funnelShort
+        array.set(counts, stage, array.get(counts, stage) + 1)
+
+bool newCall = false
+bool newPut = false
+bool invalidated = false
+bool targetReached = false
+bool expired = false
+string eventReason = ""
+
+if confirmedRTH
+    if not na(oTime) and not na(oCloseTime)
+        lastCrossOpen := oTime
+        lastCrossClose := oCloseTime
+    crossStatus := crossReady ? "Sincronizado" : "N/D o no sincronizado"
+    bool newSession = na(activeSessionKey) or activeSessionKey != rKey
+    bool terminalThisBar = false
+    if newSession
+        observedSessions += 1
+        sessionStartsAtOpen := hour(rTime, TZ) == 9 and minute(rTime, TZ) == 30
+        if pendingDirection != 0 and not na(pendingId)
+            f_funnelCount(pendingDirection, 7)
+        pendingId := na
+        pendingRetested := false
+        pendingEvaluated := false
+        if activeDirection != 0
+            expired := true
+            terminalThisBar := true
+            eventReason := not earningsGate and earningsBlockedWindow ? "Reporte de resultados" : "Cambio de sesion"
+            lastEvent := "EXPIRADA: " + eventReason
+        activeDirection := 0
+        activeSessionKey := rKey
+        signalsToday := 0
+        callsToday := 0
+        putsToday := 0
+        lastTerminalSequence := na
+        pendingDirection := 0
+        pendingLevel := na
+        pendingSequence := na
+        pendingRVOL := na
+        pendingSamples := 0
+
+    // No se aplican extremos anteriores a la emision sobre el nuevo candidato.
+    if activeDirection != 0 and rSeq > signalSequence
+        bool stopTouched = activeDirection == 1 ? rLow <= signalStop : rHigh >= signalStop
+        bool targetTouched = activeDirection == 1 ? rHigh >= signalTarget : rLow <= signalTarget
+        bool moved = activeDirection == 1 ? rClose - signalEntry > maxAdvanceATR * signalATR : signalEntry - rClose > maxAdvanceATR * signalATR
+        bool aged = rSeq - signalSequence >= maxAgeBars
+        bool directionLost = activeDirection == 1 ? not (dailyLong and dailyStructureLong and hourlyLong and structureLong and emaLong and vwapLong and crossLong) : not (dailyShort and dailyStructureShort and hourlyShort and structureShort and emaShort and vwapShort and crossShort)
+        // La nueva proteccion por reporte tiene prioridad si bloquea esta vela.
+        if not earningsGate
+            expired := true
+            eventReason := earningsReason
+        else if not premarketGate
+            expired := true
+            eventReason := "Premarket requerido: Sin datos disponibles de premarket hoy"
+        else if not liquidityGate
+            expired := true
+            eventReason := liquidityPanel
+        else if stopTouched
+            invalidated := true
+            eventReason := targetTouched ? "Toco invalidacion y objetivo: orden intrabar desconocido" : "Toco nivel de invalidacion"
+        else if targetTouched
+            targetReached := true
+            eventReason := "Primer objetivo del subyacente alcanzado"
+        else if moved
+            expired := true
+            eventReason := "Avance favorable mayor que " + str.tostring(maxAdvanceATR, "#.##") + " ATR guardado"
+        else if aged
+            expired := true
+            eventReason := "Limite de " + str.tostring(maxAgeBars) + " velas posteriores"
+        else if not timeGate or not newsGate or not dataGate
+            expired := true
+            eventReason := "Horario, noticia o datos ya no habilitan el candidato"
+        else if cancelOnTrendLoss and directionLost
+            expired := true
+            eventReason := "Perdio tendencia, estructura, EMA, VWAP o filtro ETF"
+        if invalidated or targetReached or expired
+            activeDirection := 0
+            terminalThisBar := true
+            lastTerminalSequence := rSeq
+            if pendingDirection != 0 and not na(pendingId)
+                f_funnelCount(pendingDirection, 6)
+            pendingId := na
+            pendingRetested := false
+            pendingEvaluated := false
+            pendingDirection := 0
+            pendingLevel := na
+            pendingSequence := na
+            pendingRVOL := na
+            pendingSamples := 0
+            lastEvent := (invalidated ? "INVALIDADA: " : targetReached ? "OBJETIVO: " : "EXPIRADA: ") + eventReason
+
+    array<float> levels = array.new_float()
+    array<string> levelNames = array.new_string()
+    f_addLevel(levels, levelNames, priorHigh, "Max previo")
+    f_addLevel(levels, levelNames, priorLow, "Min previo")
+    f_addLevel(levels, levelNames, dClose, "Cierre previo")
+    if orbReady
+        f_addLevel(levels, levelNames, orbHigh, "Max rango 15m")
+        f_addLevel(levels, levelNames, orbLow, "Min rango 15m")
+    f_addLevel(levels, levelNames, pivot5High, "Pivote max 5m")
+    f_addLevel(levels, levelNames, pivot5Low, "Pivote min 5m")
+    f_addLevel(levels, levelNames, hHigh, "Pivote max 1h")
+    f_addLevel(levels, levelNames, hLow, "Pivote min 1h")
+    f_addLevel(levels, levelNames, previousHOD, "Max dia conocido")
+    f_addLevel(levels, levelNames, previousLOD, "Min dia conocido")
+    // PM al final: si coincide con ORB/pivote, conservar el origen no-PM.
+    // No usar PM para setups JAMAS elimina un obstaculo conocido del RR.
+    if pmReady
+        f_addLevel(levels, levelNames, pmHigh, "Max PM")
+        f_addLevel(levels, levelNames, pmLow, "Min PM")
+
+    bool quotaGate = signalsToday < maxDailySignals
+    bool pauseGate = na(lastTerminalSequence) or rSeq - lastTerminalSequence >= cooldownBars
+    bool idleEligible = activeDirection == 0 and not terminalThisBar and timeGate and newsGate and dataGate and premarketGate and earningsGate and liquidityGate and quotaGate and pauseGate
+    int rawLongBreakId = na
+    int rawShortBreakId = na
+    bool rawLong = false
+    bool rawShort = false
+    float patternLow = na
+    float patternHigh = na
+    string longSetupName = ""
+    string shortSetupName = ""
+    float longSetupRVOL = na
+    float shortSetupRVOL = na
+    int longSetupSamples = 0
+    int shortSetupSamples = 0
+
+    if pendingDirection != 0
+        int pendingAge = rSeq - pendingSequence
+        bool failed = pendingDirection == 1 ? rClose < pendingLevel - pendingATR * levelBufferATR : rClose > pendingLevel + pendingATR * levelBufferATR
+        if pendingAge > retestBars or failed or not idleEligible
+            // Convencion diagnostica exclusiva: PLAZO > FALLO > SISTEMA.
+            // Mantiene exactamente la condicion y tolerancia de cancelacion.
+            f_funnelCount(pendingDirection, pendingAge > retestBars ? 5 : failed ? 4 : 6)
+            pendingId := na
+            pendingRetested := false
+            pendingEvaluated := false
+            pendingDirection := 0
+            pendingLevel := na
+            pendingSequence := na
+            pendingRVOL := na
+            pendingSamples := 0
+        else if pendingAge >= 1
+            float tolerance = pendingATR * levelBufferATR
+            bool touchedLevel = pendingDirection == 1 ? rLow <= pendingLevel + tolerance : rHigh >= pendingLevel - tolerance
+            if touchedLevel and not pendingRetested
+                f_funnelCount(pendingDirection, 1)
+                pendingRetested := true
+            rawLong := pendingDirection == 1 and rLow <= pendingLevel + tolerance and rClose > pendingLevel and rClose > rOpen
+            rawShort := pendingDirection == -1 and rHigh >= pendingLevel - tolerance and rClose < pendingLevel and rClose < rOpen
+            if (rawLong or rawShort) and not pendingEvaluated
+                f_funnelCount(pendingDirection, 2)
+                pendingEvaluated := true
+            if rawLong
+                rawLongBreakId := pendingId
+                patternLow := rLow
+                longSetupName := "Retesteo: " + pendingName
+                longSetupRVOL := pendingRVOL
+                longSetupSamples := pendingSamples
+            if rawShort
+                rawShortBreakId := pendingId
+                patternHigh := rHigh
+                shortSetupName := "Retesteo: " + pendingName
+                shortSetupRVOL := pendingRVOL
+                shortSetupSamples := pendingSamples
+
+    if idleEligible and enableRejection and array.size(levels) > 0
+        float body = math.abs(rClose - rOpen)
+        float candleRange = rHigh - rLow
+        float lowerWick = math.min(rOpen, rClose) - rLow
+        float upperWick = rHigh - math.max(rOpen, rClose)
+        for i = 0 to array.size(levels) - 1
+            float level = array.get(levels, i)
+            bool atSupport = math.abs(rLow - level) <= rATR * levelBufferATR
+            bool atResistance = math.abs(rHigh - level) <= rATR * levelBufferATR
+            string sourceName = array.get(levelNames, i)
+            bool useForSetup = premarketMode != "No usar" or (sourceName != "Max PM" and sourceName != "Min PM")
+            bool rejectionLong = useForSetup and body > 0 and candleRange > 0 and atSupport and rClose > rOpen and rClose > level and lowerWick >= body * wickRatio and rClose >= rLow + candleRange * 0.75
+            bool rejectionShort = useForSetup and body > 0 and candleRange > 0 and atResistance and rClose < rOpen and rClose < level and upperWick >= body * wickRatio and rClose <= rLow + candleRange * 0.25
+            if rejectionLong and not rawLong
+                rawLong := true
+                patternLow := rLow
+                longSetupName := "Rechazo: " + array.get(levelNames, i)
+                longSetupRVOL := rRVOL
+                longSetupSamples := rSamples
+            if rejectionShort and not rawShort
+                rawShort := true
+                patternHigh := rHigh
+                shortSetupName := "Rechazo: " + array.get(levelNames, i)
+                shortSetupRVOL := rRVOL
+                shortSetupSamples := rSamples
+
+    float longStop = rawLong ? math.floor((patternLow - rATR * levelBufferATR) / syminfo.mintick) * syminfo.mintick : na
+    float shortStop = rawShort ? math.ceil((patternHigh + rATR * levelBufferATR) / syminfo.mintick) * syminfo.mintick : na
+    [nearestLongTarget, nearestLongName] = f_nextLevel(levels, levelNames, rClose, 1)
+    [nearestShortTarget, nearestShortName] = f_nextLevel(levels, levelNames, rClose, -1)
+    float longTarget = nearestLongTarget
+    float shortTarget = nearestShortTarget
+    string longTargetName = nearestLongName
+    string shortTargetName = nearestShortName
+    if allowProjection and orbReady and orbHigh > orbLow
+        if na(longTarget)
+            longTarget := math.round_to_mintick(rClose + orbHigh - orbLow)
+            longTargetName := "PROY rango 15m"
+        if na(shortTarget)
+            shortTarget := math.round_to_mintick(rClose - (orbHigh - orbLow))
+            shortTargetName := "PROY rango 15m"
+    // El segundo nivel es SOLO informacion: nunca sustituye al primero.
+    [laterLongTarget, laterLongName] = f_nextLevel(levels, levelNames, longTarget, 1)
+    [laterShortTarget, laterShortName] = f_nextLevel(levels, levelNames, shortTarget, -1)
+    float longTargetATR = rATR > 0 and not na(longTarget) ? (longTarget - rClose) / rATR : na
+    float shortTargetATR = rATR > 0 and not na(shortTarget) ? (rClose - shortTarget) / rATR : na
+    bool distanceLong = not useMinTargetATR or (not na(longTargetATR) and longTargetATR >= minimumTargetATR)
+    bool distanceShort = not useMinTargetATR or (not na(shortTargetATR) and shortTargetATR >= minimumTargetATR)
+    bool volumeLong = rawLong and longSetupSamples >= math.min(rvolMinSamples, rvolDays) and not na(longSetupRVOL) and longSetupRVOL >= rvolThreshold
+    bool volumeShort = rawShort and shortSetupSamples >= math.min(rvolMinSamples, rvolDays) and not na(shortSetupRVOL) and shortSetupRVOL >= rvolThreshold
+    float longRisk = rawLong ? rClose - longStop : na
+    float shortRisk = rawShort ? shortStop - rClose : na
+    float longRR = rawLong and longRisk > syminfo.mintick and not na(longTarget) ? (longTarget - rClose) / longRisk : na
+    float shortRR = rawShort and shortRisk > syminfo.mintick and not na(shortTarget) ? (rClose - shortTarget) / shortRisk : na
+    bool rrLong = not na(longRR) and longRR >= minimumRR
+    bool rrShort = not na(shortRR) and shortRR >= minimumRR
+
+    array<bool> longGates = array.from(dataGate, timeGate, newsGate, dailyLong, dailyStructureLong, hourlyLong, structureLong, emaLong, vwapLong, rRCILong, volumeLong, crossLong, rawLong and not rawShort, rrLong, distanceLong, quotaGate, pauseGate and not terminalThisBar, premarketGate, earningsGate, liquidityGate)
+    array<bool> shortGates = array.from(dataGate, timeGate, newsGate, dailyShort, dailyStructureShort, hourlyShort, structureShort, emaShort, vwapShort, rRCIShort, volumeShort, crossShort, rawShort and not rawLong, rrShort, distanceShort, quotaGate, pauseGate and not terminalThisBar, premarketGate, earningsGate, liquidityGate)
+    bool allLong = f_all(longGates)
+    bool allShort = f_all(shortGates)
+    // Observacion del motor, antes de emitir; no modifica ningun gate.
+    // Direccionales SOLO se muestrean con raw de su propia direccion.
+    // Las casi senales revisan TODOS los gates activos, no solo direccionales.
+    if diagnosticMode and diagnosticWindow
+        diagnosticBars += 1
+        diagnosticDataBars += dataGate ? 1 : 0
+        diagnosticFirst := na(diagnosticFirst) ? rCloseTime : diagnosticFirst
+        diagnosticLast := rCloseTime
+        if na(lastDiagnosticObservedDay) or lastDiagnosticObservedDay != rKey
+            diagnosticObservedDays += 1
+            lastDiagnosticObservedDay := rKey
+        // Motivos no excluyentes: una vela/dia puede tener varios bloqueos.
+        array<bool> blockedRules = array.from(not premarketGate, earningsMissingDate, earningsBlockedWindow, earningsHistoryUnknown, earningsCalendarMissing, liquidityDataReady and not liquidityPriceOK, liquidityDataReady and not liquidityVolumeOK, not liquidityDataReady)
+        for b = 0 to array.size(blockedRules) - 1
+            if array.get(blockedRules, b)
+                array.set(blockBars, b, array.get(blockBars, b) + 1)
+                if na(array.get(blockLastDay, b)) or array.get(blockLastDay, b) != rKey
+                    array.set(blockDays, b, array.get(blockDays, b) + 1)
+                    array.set(blockLastDay, b, rKey)
+        // Excluye la primera sesion cargada y sesiones observadas desde tarde.
+        if observedSessions > 1 and sessionStartsAtOpen and (na(lastPMDiagnosticDay) or lastPMDiagnosticDay != rKey)
+            diagnosticSessionDays += 1
+            diagnosticNoPMDays += not pmReady ? 1 : 0
+            lastPMDiagnosticDay := rKey
+        diagnosticLongSetups += rawLong ? 1 : 0
+        diagnosticShortSetups += rawShort ? 1 : 0
+        diagnosticLongDataSetups += rawLong and dataGate ? 1 : 0
+        diagnosticShortDataSetups += rawShort and dataGate ? 1 : 0
+        int longFailures = 0
+        int shortFailures = 0
+        int longFailedIndex = na
+        int shortFailedIndex = na
+        for i = 0 to GATE_COUNT - 1
+            if not f_gateDisabled(i)
+                bool passLong = array.get(longGates, i)
+                bool passShort = array.get(shortGates, i)
+                bool sampleLong = not f_directionalGate(i) or rawLong
+                bool sampleShort = not f_directionalGate(i) or rawShort
+                if sampleLong and passLong
+                    array.set(diagnosticLong, i, array.get(diagnosticLong, i) + 1)
+                    if dataGate
+                        array.set(diagnosticDataLong, i, array.get(diagnosticDataLong, i) + 1)
+                if sampleShort and passShort
+                    array.set(diagnosticShort, i, array.get(diagnosticShort, i) + 1)
+                    if dataGate
+                        array.set(diagnosticDataShort, i, array.get(diagnosticDataShort, i) + 1)
+                if rawLong and not passLong
+                    longFailures += 1
+                    longFailedIndex := i
+                if rawShort and not passShort
+                    shortFailures += 1
+                    shortFailedIndex := i
+        if rawLong and longFailures == 1
+            diagnosticNearCalls += 1
+            array.set(diagnosticNearLong, longFailedIndex, array.get(diagnosticNearLong, longFailedIndex) + 1)
+        if rawShort and shortFailures == 1
+            diagnosticNearPuts += 1
+            array.set(diagnosticNearShort, shortFailedIndex, array.get(diagnosticNearShort, shortFailedIndex) + 1)
+        if rawLong and not na(longTargetATR)
+            diagnosticLongDistances += 1
+            diagnosticLongDistanceSum += longTargetATR
+        if rawShort and not na(shortTargetATR)
+            diagnosticShortDistances += 1
+            diagnosticShortDistanceSum += shortTargetATR
+    // Doble direccion siempre neutral, sin prioridad escondida.
+    if idleEligible and allLong != allShort
+        activeDirection := allLong ? 1 : -1
+        signalEntry := rClose
+        signalStop := allLong ? longStop : shortStop
+        signalTarget := allLong ? longTarget : shortTarget
+        signalATR := rATR
+        signalRR := allLong ? longRR : shortRR
+        signalTargetATR := allLong ? longTargetATR : shortTargetATR
+        signalLaterTarget := allLong ? laterLongTarget : laterShortTarget
+        signalLaterName := allLong ? laterLongName : laterShortName
+        signalSetup := allLong ? longSetupName : shortSetupName
+        signalTargetName := allLong ? longTargetName : shortTargetName
+        signalSequence := rSeq
+        signalTimestamp := rCloseTime
+        signalsToday += 1
+        callsToday += allLong ? 1 : 0
+        putsToday += allShort ? 1 : 0
+        newCall := allLong
+        newPut := allShort
+        if diagnosticMode and diagnosticWindow
+            diagnosticCalls += allLong ? 1 : 0
+            diagnosticPuts += allShort ? 1 : 0
+            diagnosticSignalDistanceSum += signalTargetATR
+        int emittedBreakId = allLong ? rawLongBreakId : rawShortBreakId
+        if not na(emittedBreakId) and emittedBreakId == pendingId
+            f_funnelCount(pendingDirection, 3)
+        else
+            if diagnosticMode
+                diagnosticRejectionCalls += allLong ? 1 : 0
+                diagnosticRejectionPuts += allShort ? 1 : 0
+            if pendingDirection != 0 and not na(pendingId)
+                f_funnelCount(pendingDirection, 6)
+        pendingId := na
+        pendingRetested := false
+        pendingEvaluated := false
+        lastEvent := (allLong ? "CALL candidato" : "PUT candidato") + " - " + signalSetup
+        pendingDirection := 0
+        pendingLevel := na
+        pendingSequence := na
+        pendingRVOL := na
+        pendingSamples := 0
+
+    // Un nuevo setup solo puede nacer despues de la pausa y sin candidato activo.
+    if enableRetest and idleEligible and activeDirection == 0 and pendingDirection == 0 and array.size(levels) > 0
+        float bestBreak = na
+        string bestBreakName = ""
+        int breakDirection = 0
+        for i = 0 to array.size(levels) - 1
+            float level = array.get(levels, i)
+            string sourceName = array.get(levelNames, i)
+            bool useForSetup = premarketMode != "No usar" or (sourceName != "Max PM" and sourceName != "Min PM")
+            bool brokeUp = useForSetup and rPreviousClose <= level and rClose > level + rATR * levelBufferATR
+            bool brokeDown = useForSetup and rPreviousClose >= level and rClose < level - rATR * levelBufferATR
+            if brokeUp and (na(bestBreak) or breakDirection == -1 or level > bestBreak)
+                bestBreak := level
+                bestBreakName := array.get(levelNames, i)
+                breakDirection := 1
+            if brokeDown and (na(bestBreak) or breakDirection == 1 or level < bestBreak)
+                bestBreak := level
+                bestBreakName := array.get(levelNames, i)
+                breakDirection := -1
+        if breakDirection != 0
+            nextOpportunityId += 1
+            pendingId := nextOpportunityId
+            pendingRetested := false
+            pendingEvaluated := false
+            f_funnelCount(breakDirection, 0)
+            pendingDirection := breakDirection
+            pendingLevel := bestBreak
+            pendingName := bestBreakName
+            pendingATR := rATR
+            pendingSequence := rSeq
+            pendingRVOL := rRVOL
+            pendingSamples := rSamples
+
+    array<string> details = array.from(
+         "D " + (dailyReady ? "OK" : "N/D") + " / 1h " + (hourReady ? "OK" : "N/D") + " / PM " + (pmReady ? "OK" : (premarketMode == "Exigir" ? "N/D requerido" : "N/D opcional")) + (scheduleReady ? " / cierre " + str.format_time(sessionCloseTimestamp, "HH:mm", TZ) : " / cierre N/D"),
+         startLabel + "-" + endLabel + " NY / ORB " + (orbReady ? "OK" : "incompleto"),
+         blockedByDate ? "Fecha NY bloqueada" : blockedByEvent ? "Evento NY " + f_stamp(blockingEvent) : "Sin bloqueo manual",
+         "C " + f_price(dClose) + " / " + str.tostring(dailyFastLen) + "-" + str.tostring(dailySlowLen),
+         useDailyStructure ? "H " + f_price(dPreviousHigh) + "/" + f_price(dHigh) + " L " + f_price(dPreviousLow) + "/" + f_price(dLow) : "OFF (opcional)",
+         "Ultima 1h completa " + f_stamp(hStamp),
+         useStructure ? "HH/HL para CALL; LH/LL para PUT" : "OFF",
+         str.tostring(fastLen) + "/" + str.tostring(slowLen) + " | C " + f_price(rClose),
+         f_price(rVWAP),
+         str.tostring(rRCI, "#.0") + " | recuperacion hasta " + str.tostring(rciWindow) + "v",
+         "Setup C/P " + f_number(longSetupRVOL) + "/" + f_number(shortSetupRVOL) + "x | actual informativo " + f_number(rRVOL) + "x (n=" + str.tostring(rSamples) + ")" + (pendingDirection != 0 ? " | ruptura guardada " + f_number(pendingRVOL) + "x n=" + str.tostring(pendingSamples) : ""),
+         useCrossETF ? otherSource + (not crossReady ? " N/D/no sincronizado" : otherBearish ? " bajista" : otherBullish ? " alcista" : " sin oposicion clara") : "OFF",
+         rawLong ? longSetupName : rawShort ? shortSetupName : pendingDirection != 0 ? "Esperando retest: " + pendingName : "Esperando reaccion nueva",
+         "Primer obstaculo C " + f_number(longRR) + "R / P " + f_number(shortRR) + "R",
+         "C " + f_number(longTargetATR) + " / P " + f_number(shortTargetATR) + " ATR | " + (useMinTargetATR ? "min " + f_number(minimumTargetATR) : "filtro OFF"),
+         str.tostring(signalsToday) + "/" + str.tostring(maxDailySignals) + " | C " + str.tostring(callsToday) + " P " + str.tostring(putsToday),
+         pauseGate ? "Requiere setup nuevo" : "En pausa",
+         pmReady ? premarketMode + " | PM conocido siempre cuenta como obstaculo" : "Sin datos disponibles de premarket hoy | " + premarketMode,
+         earningsPanel,
+         liquidityPanel)
+    if activeDirection == 0 or newCall or newPut
+        panelLong := array.copy(longGates)
+        panelShort := array.copy(shortGates)
+        panelDetails := array.copy(details)
+        panelTimestamp := f_stamp(rCloseTime)
+        panelLongTargetATR := longTargetATR
+        panelShortTargetATR := shortTargetATR
+    panelFrozen := activeDirection != 0
+    waitReason := "CALL falta: " + f_firstMissing(longGates, gateNames) + " | PUT falta: " + f_firstMissing(shortGates, gateNames)
+
+// Niveles fijados al emitir; series ocultas disponibles para las alertas.
+plot(showLevels and activeDirection != 0 ? signalEntry : na, "Entrada activa", color = color.new(color.gray, 20), style = plot.style_linebr)
+plot(showLevels and activeDirection != 0 ? signalStop : na, "Invalidacion activa", color = color.orange, style = plot.style_linebr, linewidth = 2)
+plot(showLevels and activeDirection != 0 ? signalTarget : na, "Objetivo activo", color = color.aqua, style = plot.style_linebr, linewidth = 2)
+plot(signalEntry, "AB CP Entrada", display = display.none)
+plot(signalStop, "AB CP Invalidacion", display = display.none)
+plot(signalTarget, "AB CP Objetivo", display = display.none)
+plot(signalRR, "AB CP RR", display = display.none)
+plot(signalTargetATR, "AB CP Objetivo ATR", display = display.none)
+plotshape(newCall, title = "AB-Validator C-P | CALL", style = shape.labelup, location = location.belowbar, color = color.rgb(0, 150, 90), text = "CALL", textcolor = color.white, size = size.small)
+plotshape(newPut, title = "AB-Validator C-P | PUT", style = shape.labeldown, location = location.abovebar, color = color.rgb(210, 45, 60), text = "PUT", textcolor = color.white, size = size.small)
+plotshape(invalidated, title = "AB-Validator C-P | Invalidacion", style = shape.xcross, location = location.abovebar, color = color.orange, size = size.tiny, text = "INV")
+plotshape(targetReached, title = "AB-Validator C-P | OBJETIVO", style = shape.diamond, location = location.abovebar, color = color.aqua, size = size.small, text = "OBJ")
+plotshape(expired, title = "AB-Validator C-P | Expiracion", style = shape.xcross, location = location.belowbar, color = color.gray, size = size.tiny, text = "EXP")
+bgcolor(showBackground ? activeDirection == 1 ? color.new(color.green, 92) : activeDirection == -1 ? color.new(color.red, 92) : na : na)
+
+alertcondition(newCall, "AB-Validator C-P | CALL candidato", "AB-Validator C-P | CALL candidato | {{ticker}} | Entrada={{plot(\"AB CP Entrada\")}} | Invalidacion={{plot(\"AB CP Invalidacion\")}} | Objetivo={{plot(\"AB CP Objetivo\")}} | RR={{plot(\"AB CP RR\")}} | DistanciaATR={{plot(\"AB CP Objetivo ATR\")}}")
+alertcondition(newPut, "AB-Validator C-P | PUT candidato", "AB-Validator C-P | PUT candidato | {{ticker}} | Entrada={{plot(\"AB CP Entrada\")}} | Invalidacion={{plot(\"AB CP Invalidacion\")}} | Objetivo={{plot(\"AB CP Objetivo\")}} | RR={{plot(\"AB CP RR\")}} | DistanciaATR={{plot(\"AB CP Objetivo ATR\")}}")
+alertcondition(invalidated, "AB-Validator C-P | Invalidacion", "AB-Validator C-P | INVALIDACION | {{ticker}} | Referencia={{plot(\"AB CP Invalidacion\")}} | Revise el panel")
+alertcondition(targetReached, "AB-Validator C-P | OBJETIVO", "AB-Validator C-P | OBJETIVO del subyacente alcanzado | {{ticker}} | Referencia={{plot(\"AB CP Objetivo\")}} | No representa resultado de un contrato de opciones")
+alertcondition(expired, "AB-Validator C-P | Senal expirada", "AB-Validator C-P | EXPIRADA | {{ticker}} | Revise el motivo en el panel")
+
+if dynamicAlerts and (newCall or newPut or invalidated or targetReached or expired)
+    string eventType = newCall ? "CALL candidato" : newPut ? "PUT candidato" : invalidated ? "INVALIDACION" : targetReached ? "OBJETIVO" : "EXPIRADA"
+    string message = "AB-Validator C-P | " + eventType + " | " + syminfo.ticker + " | 5m | NY " + f_stamp(time_close) + " | Entrada " + f_price(signalEntry) + " | Invalidacion " + f_price(signalStop) + " | Objetivo " + f_price(signalTarget) + " | RR " + f_number(signalRR) + " | Distancia " + f_number(signalTargetATR) + " ATR | " + ((newCall or newPut) ? signalSetup : eventReason)
+    alert(message, alert.freq_once_per_bar_close)
+
+// Paneles v1.4. Sustituye desde f_cell() hasta el final de v1.3.
+// Los contadores y condiciones se calculan en el motor, nunca en estas tablas.
+f_cell(table t, int col, int row, string txt, color bg, color fg) =>
+    table.cell(t, col, row, txt, bgcolor = bg, text_color = fg, text_size = size.tiny, text_halign = text.align_left)
+
+// Solo presentacion. No altera gates, candidatos, niveles ni alertas.
+f_compactIndices(int group) =>
+    switch group
+        0 => array.from(3, 4)
+        1 => array.from(5, 6)
+        2 => array.from(7, 8)
+        3 => array.from(9)
+        4 => array.from(10)
+        5 => array.from(11)
+        6 => array.from(12)
+        7 => array.from(13, 14)
+        => array.from(0, 1, 2, 15, 16, 17, 18, 19)
+
+f_compactWrap(string value, int width) =>
+    array<string> words = str.split(str.replace_all(value, "\n", " "), " ")
+    string result = ""
+    int lineLength = 0
+    for i = 0 to array.size(words) - 1
+        string word = array.get(words, i)
+        int wordLength = str.length(word)
+        if wordLength > 0
+            bool newLine = lineLength > 0 and lineLength + 1 + wordLength > width
+            result += lineLength == 0 ? word : newLine ? "\n" + word : " " + word
+            lineLength := lineLength == 0 or newLine ? wordLength : lineLength + 1 + wordLength
+    result
+
+f_compactStatus(array<bool> gates, int group, bool hasPanel) =>
+    array<int> indices = f_compactIndices(group)
+    bool anyEnabled = false
+    bool allPassed = true
+    for i = 0 to array.size(indices) - 1
+        int index = array.get(indices, i)
+        if not f_gateDisabled(index)
+            anyEnabled := true
+            allPassed := allPassed and array.get(gates, index)
+    bool noSetup = hasPanel and not array.get(gates, 12)
+    string result = not anyEnabled ? "OFF" : not hasPanel ? "N/D" : group == 8 and not array.get(gates, 0) ? "N/D" : (group == 4 or group == 7) and noSetup ? "—" : allPassed ? "✓" : "✗"
+    result
+
+f_compactColor(string status) =>
+    status == "✓" ? color.rgb(45, 200, 130) : status == "✗" ? color.rgb(240, 100, 110) : status == "N/D" ? color.orange : status == "OFF" ? color.gray : color.silver
+
+f_compactDetail(array<bool> gates, int group, bool hasPanel) =>
+    array<int> indices = f_compactIndices(group)
+    string result = hasPanel ? "Validacion del ultimo cierre guardado" : "Sin cierre RTH de 5m confirmado"
+    for i = 0 to array.size(indices) - 1
+        int index = array.get(indices, i)
+        string state = f_gateDisabled(index) ? "OFF" : not hasPanel ? "N/D" : array.get(gates, index) ? "✓" : "✗"
+        result += "\n" + array.get(gateNames, index) + ": " + state + " | " + array.get(panelDetails, index)
+    if hasPanel and (group == 4 or group == 7) and not array.get(gates, 12)
+        result += "\n—: sin setup de esta direccion. No implica datos aprobados."
+    result
+
+f_compactOperationalMissing(array<bool> gates) =>
+    array<int> priority = array.from(0, 18, 2, 17, 19, 1, 15, 16)
+    int result = -1
+    for i = 0 to array.size(priority) - 1
+        int index = array.get(priority, i)
+        if result == -1 and not f_gateDisabled(index) and not array.get(gates, index)
+            result := index
+    result
+
+f_compactDirectionalMissing(array<bool> gates) =>
+    array<int> priority = array.from(3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
+    string result = "ninguno"
+    for i = 0 to array.size(priority) - 1
+        int index = array.get(priority, i)
+        if result == "ninguno" and not f_gateDisabled(index) and not array.get(gates, index)
+            result := array.get(gateNames, index)
+    result
+
+f_compactCell(table target, int col, int row, string caption, color background, color foreground, string detail, bool tiny) =>
+    table.cell(target, col, row, caption, bgcolor = background, text_color = foreground, text_size = tiny ? size.tiny : size.small, text_halign = text.align_left, tooltip = detail)
+
+const int DASH_FOOTER = GATE_COUNT + 4
+const int DASH_ROWS = DASH_FOOTER + 15
+const int COMPACT_ROWS = 17
+int dashboardColumns = panelView == "Compacto" ? 3 : 4
+int dashboardRows = panelView == "Compacto" ? COMPACT_ROWS : DASH_ROWS
+const int DIAG_ROWS = 40
+var string tablePosition = panelLocation == "Abajo derecha" ? position.bottom_right : panelLocation == "Abajo izquierda" ? position.bottom_left : position.top_right
+var string diagnosticPosition = diagnosticLocation == "Abajo izquierda" ? position.bottom_left : diagnosticLocation == "Arriba derecha" ? position.top_right : diagnosticLocation == "Abajo derecha" ? position.bottom_right : position.top_left
+var table dashboard = table.new(tablePosition, dashboardColumns, dashboardRows, border_width = 1, border_color = color.rgb(55, 60, 66))
+var table diagnostics = table.new(diagnosticPosition, 8, DIAG_ROWS, border_width = 1, border_color = color.rgb(55, 60, 66))
+if barstate.isfirst
+    if panelView == "Compacto"
+        table.merge_cells(dashboard, 0, 0, 2, 0)
+        table.merge_cells(dashboard, 0, 1, 2, 1)
+        for row = 12 to COMPACT_ROWS - 1
+            table.merge_cells(dashboard, 0, row, 2, row)
+    else
+        for row = 0 to 2
+            table.merge_cells(dashboard, 0, row, 3, row)
+        for row = DASH_FOOTER to DASH_ROWS - 1
+            table.merge_cells(dashboard, 0, row, 3, row)
+    for row = 0 to 2
+        table.merge_cells(diagnostics, 0, row, 7, row)
+    if diagnosticView == "Filtros y casi senales"
+        for row = GATE_COUNT + 4 to DIAG_ROWS - 1
+            table.merge_cells(diagnostics, 0, row, 7, row)
+    else
+        for row = 12 to 14
+            table.merge_cells(diagnostics, 0, row, 7, row)
+        for row = 15 to 23
+            table.merge_cells(diagnostics, 5, row, 7, row)
+        for row = 24 to DIAG_ROWS - 1
+            table.merge_cells(diagnostics, 0, row, 7, row)
+
+if barstate.islast and showPanel and panelView == "Detallado"
+    color dark = color.rgb(20, 24, 31)
+    color dim = color.rgb(36, 42, 51)
+    color white = color.rgb(225, 230, 235)
+    color ok = color.rgb(45, 200, 130)
+    color bad = color.rgb(240, 100, 110)
+    color stateColor = activeDirection == 1 ? color.rgb(0, 150, 90) : activeDirection == -1 ? color.rgb(210, 45, 60) : color.rgb(80, 85, 92)
+    string stateText = activeDirection == 1 ? "CALL candidato" : activeDirection == -1 ? "PUT candidato" : "ESPERAR"
+    f_cell(dashboard, 0, 0, "AB-Validator (vs v1.4)\n" + syminfo.ticker, stateColor, color.white)
+    f_cell(dashboard, 0, 1, stateText, stateColor, color.white)
+    table.cell_set_text_halign(dashboard, 0, 0, text.align_center)
+    table.cell_set_text_halign(dashboard, 0, 1, text.align_center)
+    f_cell(dashboard, 0, 2, (panelFrozen ? "Filtros guardados al emitir: " : "Ultimo cierre RTH: ") + panelTimestamp + " NY", dark, color.silver)
+    f_cell(dashboard, 0, 3, "Condicion", dim, white)
+    f_cell(dashboard, 1, 3, "CALL", dim, white)
+    f_cell(dashboard, 2, 3, "PUT", dim, white)
+    f_cell(dashboard, 3, 3, "Detalle", dim, white)
+    for i = 0 to GATE_COUNT - 1
+        bool l = array.get(panelLong, i)
+        bool s = array.get(panelShort, i)
+        bool disabled = f_gateDisabled(i)
+        f_cell(dashboard, 0, i + 4, array.get(gateNames, i), dark, white)
+        f_cell(dashboard, 1, i + 4, disabled ? "OFF" : l ? "✓" : "✗", dark, disabled ? color.gray : l ? ok : bad)
+        f_cell(dashboard, 2, i + 4, disabled ? "OFF" : s ? "✓" : "✗", dark, disabled ? color.gray : s ? ok : bad)
+        f_cell(dashboard, 3, i + 4, array.get(panelDetails, i), dark, color.silver)
+    f_cell(dashboard, 0, DASH_FOOTER, (activeDirection != 0 ? "Entrada: " : "Ultima entrada: ") + f_price(signalEntry) + " | Inval: " + f_price(signalStop), dark, white)
+    f_cell(dashboard, 0, DASH_FOOTER + 1, "Primer objetivo: " + f_price(signalTarget) + " " + signalTargetName + " | RR: " + f_number(signalRR), dark, white)
+    f_cell(dashboard, 0, DASH_FOOTER + 2, "Distancia guardada " + f_number(signalTargetATR) + " ATR | Ultima evaluacion C/P " + f_number(panelLongTargetATR) + "/" + f_number(panelShortTargetATR), dark, color.silver)
+    f_cell(dashboard, 0, DASH_FOOTER + 3, "Nivel posterior SOLO INFO: " + f_price(signalLaterTarget) + " " + signalLaterName, dark, color.silver)
+    f_cell(dashboard, 0, DASH_FOOTER + 4, activeDirection != 0 ? "Edad: " + str.tostring(rSeq - signalSequence) + "/" + str.tostring(maxAgeBars) + " velas | ATR guardado: " + f_price(signalATR) : waitReason, dark, color.silver)
+    f_cell(dashboard, 0, DASH_FOOTER + 5, lastEvent, dark, color.silver)
+    f_cell(dashboard, 0, DASH_FOOTER + 6, "Dia: " + str.tostring(signalsToday) + "/" + str.tostring(maxDailySignals) + " candidatos | Pendiente #" + (na(pendingId) ? "ninguno" : str.tostring(pendingId)) + " | 1h " + f_stamp(hStamp), dark, color.silver)
+    f_cell(dashboard, 0, DASH_FOOTER + 7, otherSource + " | ultima vela recibida " + f_stamp(lastCrossOpen) + " -> " + f_stamp(lastCrossClose) + " NY | " + crossStatus, dark, color.silver)
+    f_cell(dashboard, 0, DASH_FOOTER + 8, na(nextNewsEvent) ? "Proximo evento manual NY: ninguno futuro habilitado" : "Proximo evento manual #" + str.tostring(nextNewsNumber) + ": " + str.format_time(nextNewsEvent, "yyyy-MM-dd HH:mm", TZ) + " NY", dark, color.silver)
+    f_cell(dashboard, 0, DASH_FOOTER + 9, "Noticias/ajustes: fecha y hora NY | RECREAR ALERTAS al cambiar", dark, color.orange)
+    f_cell(dashboard, 0, DASH_FOOTER + 10, "Eventos al cierre 5m | Subyacente | Parametros sin validar", dark, color.orange)
+    f_cell(dashboard, 0, DASH_FOOTER + 11, "Premarket: " + premarketMode + " | " + (pmReady ? "niveles disponibles" : "Sin datos disponibles de premarket hoy"), dark, pmReady ? color.silver : color.orange)
+    f_cell(dashboard, 0, DASH_FOOTER + 12, "Reportes: " + earningsPanel, dark, color.silver)
+    f_cell(dashboard, 0, DASH_FOOTER + 13, "Cobertura de reportes: " + earningsCoveragePanel, dark, color.orange)
+    f_cell(dashboard, 0, DASH_FOOTER + 14, "Liquidez subyacente: " + liquidityPanel + " | No valida contratos", dark, color.silver)
+if barstate.islast and not showPanel
+    table.clear(dashboard, 0, 0, dashboardColumns - 1, dashboardRows - 1)
+
+// Requiere dashboard de 3 columnas x 17 filas en modo Compacto.
+// Unir 0..2 en filas 0, 1 y 12..16. Filas 2..11 tienen tres celdas.
+// El modo Detallado y el diagnostico los integra el archivo principal.
+if barstate.islast and showPanel and panelView == "Compacto"
+    color compactDark = color.rgb(20, 24, 31)
+    color compactDim = color.rgb(36, 42, 51)
+    color compactWhite = color.rgb(225, 230, 235)
+    bool compactHasPanel = panelTimestamp != "Sin datos" and panelTimestamp != "N/D"
+    bool compactOutsideRTH = not session.ismarket or rTime != time or rCloseTime != time_close
+    int compactDirection = compactOutsideRTH ? 0 : activeDirection
+    color compactStateColor = compactDirection == 1 ? color.rgb(0, 150, 90) : compactDirection == -1 ? color.rgb(210, 45, 60) : color.rgb(80, 85, 92)
+    string compactStateText = compactDirection == 1 ? "CALL candidato" : compactDirection == -1 ? "PUT candidato" : "ESPERAR"
+    string compactSnapshotKind = panelFrozen ? "Al emitir: " : "Ultimo cierre RTH: "
+    f_compactCell(dashboard, 0, 0, "AB-Validator (vs v1.4)\n" + syminfo.ticker, compactStateColor, color.white, "Modo Compacto. Mismos filtros y motor de la v1.4.", false)
+    f_compactCell(dashboard, 0, 1, compactStateText, compactStateColor, color.white, compactOutsideRTH ? "Fuera de RTH en la barra visible. Solo cambia la presentacion; el motor conserva su estado." : lastEvent, false)
+    table.cell_set_text_halign(dashboard, 0, 0, text.align_center)
+    table.cell_set_text_halign(dashboard, 0, 1, text.align_center)
+    f_compactCell(dashboard, 0, 2, "Filtro", compactDim, compactWhite, "Cada bloque combina todos sus subfiltros activos con AND.", false)
+    f_compactCell(dashboard, 1, 2, "CALL", compactDim, compactWhite, "✓: bloque completo. ✗: falta algun requisito. N/D: sin evaluacion o datos base insuficientes.", false)
+    f_compactCell(dashboard, 2, 2, "PUT", compactDim, compactWhite, "OFF: todos los subfiltros de este bloque estan desactivados. —: aun no hay setup para medir RVOL/RR.", false)
+    array<string> compactLabels = array.from("Diario", "1 hora", "Entrada 5m", "Momentum RCI", "Volumen RVOL", "Mercado ETF", "Setup", "Espacio / RR", "Protecciones")
+    for group = 0 to 8
+        string callStatus = f_compactStatus(panelLong, group, compactHasPanel)
+        string putStatus = f_compactStatus(panelShort, group, compactHasPanel)
+        string callDetail = f_compactDetail(panelLong, group, compactHasPanel)
+        string putDetail = f_compactDetail(panelShort, group, compactHasPanel)
+        f_compactCell(dashboard, 0, group + 3, array.get(compactLabels, group), compactDark, compactWhite, callDetail + "\n\nPUT\n" + putDetail, false)
+        f_compactCell(dashboard, 1, group + 3, callStatus, compactDark, f_compactColor(callStatus), callDetail, false)
+        f_compactCell(dashboard, 2, group + 3, putStatus, compactDark, f_compactColor(putStatus), putDetail, false)
+
+    bool compactShowPlan = compactDirection != 0
+    string compactPlan = compactShowPlan ? "Entrada " + f_price(signalEntry) + " | Inval " + f_price(signalStop) : "Entrada — | Inval —"
+    string compactTarget = compactShowPlan ? "Objetivo " + f_price(signalTarget) + " | RR " + f_number(signalRR) : "Objetivo — | RR —"
+    f_compactCell(dashboard, 0, 12, f_compactWrap(compactPlan, 42), compactDark, compactWhite, "Niveles congelados al emitir; desaparecen del panel compacto cuando no hay candidato vigente.\n" + signalSetup, false)
+    f_compactCell(dashboard, 0, 13, f_compactWrap(compactTarget, 42), compactDark, compactWhite, signalTargetName + " | Distancia " + f_number(signalTargetATR) + " ATR. Primer obstaculo; el nivel posterior no sustituye este objetivo.", false)
+
+    int compactOpMissing = f_compactOperationalMissing(panelLong)
+    string compactReason = ""
+    string compactReasonDetail = waitReason
+    if compactOutsideRTH
+        compactReason := "Fuera de RTH: esperar cierre regular"
+    else if not compactHasPanel
+        compactReason := "Sin cierre RTH de 5m confirmado"
+    else if compactDirection != 0
+        compactReason := "Candidato vigente | edad " + str.tostring(rSeq - signalSequence) + "/" + str.tostring(maxAgeBars) + " velas"
+        compactReasonDetail := "Filtros guardados al emitir.\n" + lastEvent
+    else if compactOpMissing >= 0
+        if compactOpMissing == 0
+            compactReason := "Datos base N/D o no sincronizados"
+        else if compactOpMissing == 18
+            string savedReport = array.get(panelDetails, 18)
+            compactReason := str.contains(savedReport, "Historial") ? "Reportes: historia no verificable" : str.contains(savedReport, "Calendario") ? "Reportes: calendario RTH N/D" : str.contains(savedReport, "Reporte de resultados") ? "Reporte: ventana bloqueada" : "Reportes: fecha N/D u obsoleta"
+        else if compactOpMissing == 2
+            compactReason := str.contains(array.get(panelDetails, 2), "Fecha NY bloqueada") ? "Noticias: fecha NY bloqueada" : "Noticias: ventana de evento NY"
+        else if compactOpMissing == 17
+            compactReason := "Premarket exigido: sin datos hoy"
+        else if compactOpMissing == 19
+            compactReason := str.contains(array.get(panelDetails, 19), "N/D") ? "Liquidez N/D: requiere 20 sesiones" : "Liquidez: precio o ADV20 bajo el minimo"
+        else if compactOpMissing == 1
+            compactReason := str.contains(array.get(panelDetails, 1), "incompleto") ? "Rango inicial de 15m incompleto" : "Horario: fuera de ventana de senales"
+        else if compactOpMissing == 15
+            compactReason := "Cupo: limite diario alcanzado"
+        else
+            compactReason := "Pausa: esperar un setup nuevo"
+        compactReasonDetail := array.get(gateNames, compactOpMissing) + "\n" + array.get(panelDetails, compactOpMissing)
+    else
+        compactReason := "CALL falta: " + f_compactDirectionalMissing(panelLong) + "\nPUT falta: " + f_compactDirectionalMissing(panelShort)
+    string compactReasonDisplay = str.contains(compactReason, "\n") ? compactReason : f_compactWrap(compactReason, 42)
+    f_compactCell(dashboard, 0, 14, compactReasonDisplay, compactDark, compactDirection != 0 ? color.silver : color.orange, compactReasonDetail, false)
+
+    string compactCrossStamp = not useCrossETF ? "ETF referencia: OFF" : "ETF " + f_stamp(lastCrossClose) + " NY"
+    string compactTimeLabel = compactSnapshotKind + (compactHasPanel ? panelTimestamp : "N/D") + " NY\n" + compactCrossStamp
+    f_compactCell(dashboard, 0, 15, compactTimeLabel, compactDark, color.silver, "Los filtros pueden ser una instantanea guardada. La segunda linea identifica la ultima vela recibida del ETF.\n" + otherSource + " | " + crossStatus + " | " + f_stamp(lastCrossOpen) + " -> " + f_stamp(lastCrossClose) + " NY", true)
+
+    string compactEarningsLine = not earningsApplies ? "Reportes ETF: N/A" : not enableEarningsBlock ? "Reportes OFF: cobertura no verificada" : "Reporte " + (earningsAutoUseful ? "AUTO snapshot " : earningsManualUseful ? "MANUAL " : "N/D ") + (na(earningsSelectedTimestamp) ? "" : earningsSelectedLabel)
+    string compactCoverageLine = earningsActive ? "Historial previo no verificable\nObservacion desde " + str.format_time(earningsObservationTimestamp, "yyyy-MM-dd HH:mm", TZ) + " NY" : ""
+    string compactNoticeLine = pmReady ? "Fechas/ajustes: RECREAR ALERTAS" : "PM N/D hoy | RECREAR ALERTAS"
+    string compactNotices = compactEarningsLine + (compactCoverageLine != "" ? "\n" + compactCoverageLine : "") + "\n" + compactNoticeLine
+    string compactNoticesDetail = earningsPanel + "\n" + earningsCoveragePanel + "\nPremarket: " + premarketMode + (pmReady ? "; niveles disponibles" : "; sin datos disponibles de premarket hoy") + "\nLas fechas son snapshots; cambiar fecha, simbolo o ajustes exige recrear las alertas. Recargar no reconstruye candidatos anteriores."
+    f_compactCell(dashboard, 0, 16, compactNotices, compactDark, earningsActive or not pmReady or (earningsApplies and not enableEarningsBlock) ? color.orange : color.silver, compactNoticesDetail, true)
+
+if barstate.islast and diagnosticMode
+    color dark = color.rgb(20, 24, 31)
+    color dim = color.rgb(36, 42, 51)
+    color white = color.rgb(225, 230, 235)
+    color good = color.rgb(45, 200, 130)
+    color bad = color.rgb(240, 100, 110)
+    int emitted = diagnosticCalls + diagnosticPuts
+    string sampleLabel = "Muestra NY: " + (na(diagnosticFirst) ? "N/D" : str.format_time(diagnosticFirst, "yyyy-MM-dd HH:mm", TZ)) + " -> " + f_stamp(diagnosticLast)
+    string noSampleLabel = diagnosticBars == 0 ? "N=0: sin cierres RTH en la ventana cargada; no equivale a filtros aprobados" : diagnosticDataBars == 0 ? "ND=0: datos base bloqueados; revisar motivo por separado" : diagnosticLongSetups + diagnosticShortSetups == 0 ? "S=0: sin setup confirmado; revisar rupturas, embudo y bloqueos" : "Casi = vela con setup y exactamente un filtro activo fallido; no es candidato"
+    f_cell(diagnostics, 0, 0, "AB-Validator (vs v1.4) | " + syminfo.ticker + " | " + diagnosticView, dark, white)
+    f_cell(diagnostics, 0, 1, "N horario=" + str.tostring(diagnosticBars) + " | ND datos base=" + str.tostring(diagnosticDataBars) + " (" + f_rate(diagnosticDataBars, diagnosticBars) + ")", dark, color.silver)
+    f_cell(diagnostics, 0, 2, "S raw C/P " + str.tostring(diagnosticLongSetups) + "/" + str.tostring(diagnosticShortSetups) + " | SD raw+datos C/P " + str.tostring(diagnosticLongDataSetups) + "/" + str.tostring(diagnosticShortDataSetups) + " | Candidatos " + str.tostring(emitted) + " | Casi C/P " + str.tostring(diagnosticNearCalls) + "/" + str.tostring(diagnosticNearPuts), dark, color.silver)
+
+    if diagnosticView == "Filtros y casi senales"
+        f_cell(diagnostics, 0, 3, "Filtro", dim, white)
+        f_cell(diagnostics, 1, 3, "C %S/N", dim, white)
+        f_cell(diagnostics, 2, 3, "P %S/N", dim, white)
+        f_cell(diagnostics, 3, 3, "C %SD", dim, white)
+        f_cell(diagnostics, 4, 3, "P %SD", dim, white)
+        f_cell(diagnostics, 5, 3, "C %ND", dim, white)
+        f_cell(diagnostics, 6, 3, "P %ND", dim, white)
+        f_cell(diagnostics, 7, 3, "Casi C/P", dim, white)
+        for i = 0 to GATE_COUNT - 1
+            bool disabled = f_gateDisabled(i)
+            bool directional = f_directionalGate(i)
+            int passedLong = array.get(diagnosticLong, i)
+            int passedShort = array.get(diagnosticShort, i)
+            int passedDataLong = array.get(diagnosticDataLong, i)
+            int passedDataShort = array.get(diagnosticDataShort, i)
+            int baseLong = directional ? diagnosticLongSetups : diagnosticBars
+            int baseShort = directional ? diagnosticShortSetups : diagnosticBars
+            f_cell(diagnostics, 0, i + 4, array.get(gateNames, i), dark, white)
+            f_cell(diagnostics, 1, i + 4, disabled ? "OFF" : f_rate(passedLong, baseLong), dark, disabled ? color.gray : color.silver)
+            f_cell(diagnostics, 2, i + 4, disabled ? "OFF" : f_rate(passedShort, baseShort), dark, disabled ? color.gray : color.silver)
+            f_cell(diagnostics, 3, i + 4, disabled ? "OFF" : directional ? f_rate(passedDataLong, diagnosticLongDataSetups) : "-", dark, disabled ? color.gray : color.silver)
+            f_cell(diagnostics, 4, i + 4, disabled ? "OFF" : directional ? f_rate(passedDataShort, diagnosticShortDataSetups) : "-", dark, disabled ? color.gray : color.silver)
+            f_cell(diagnostics, 5, i + 4, disabled ? "OFF" : f_rate(passedDataLong, diagnosticDataBars), dark, disabled ? color.gray : color.silver)
+            f_cell(diagnostics, 6, i + 4, disabled ? "OFF" : f_rate(passedDataShort, diagnosticDataBars), dark, disabled ? color.gray : color.silver)
+            f_cell(diagnostics, 7, i + 4, disabled ? "-" : str.tostring(array.get(diagnosticNearLong, i)) + "/" + str.tostring(array.get(diagnosticNearShort, i)), dark, color.silver)
+        int footer = GATE_COUNT + 4
+        f_cell(diagnostics, 0, footer, "Candidatos emitidos: " + str.tostring(emitted) + " | CALL " + str.tostring(diagnosticCalls) + " PUT " + str.tostring(diagnosticPuts), dark, white)
+        f_cell(diagnostics, 0, footer + 1, "Velas casi: exactamente UN filtro activo falla | C/P " + str.tostring(diagnosticNearCalls) + "/" + str.tostring(diagnosticNearPuts), dark, white)
+        f_cell(diagnostics, 0, footer + 2, "Objetivo/ATR medio setups C/P: " + f_number(diagnosticLongDistances > 0 ? diagnosticLongDistanceSum / diagnosticLongDistances : na) + "/" + f_number(diagnosticShortDistances > 0 ? diagnosticShortDistanceSum / diagnosticShortDistances : na) + " | n " + str.tostring(diagnosticLongDistances) + "/" + str.tostring(diagnosticShortDistances), dark, color.silver)
+        f_cell(diagnostics, 0, footer + 3, "Objetivo/ATR medio candidatos: " + f_number(emitted > 0 ? diagnosticSignalDistanceSum / emitted : na) + " | n " + str.tostring(emitted), dark, color.silver)
+        f_cell(diagnostics, 0, footer + 4, sampleLabel, dark, color.silver)
+        f_cell(diagnostics, 0, footer + 5, "%S/N: direccionales sobre S de su direccion; operativos sobre N", dark, color.orange)
+        f_cell(diagnostics, 0, footer + 6, "%SD: cumple en raw+datos / SD de su direccion", dark, color.orange)
+        f_cell(diagnostics, 0, footer + 7, "%ND: cumple en su base+datos / ND; incidencia, no tasa sobre setups", dark, color.orange)
+        f_cell(diagnostics, 0, footer + 8, "S/SD cuentan velas raw; no rupturas unicas. OFF no cuenta como fallo", dark, color.orange)
+        f_cell(diagnostics, 0, footer + 9, noSampleLabel, dark, color.orange)
+        f_cell(diagnostics, 0, footer + 10, "dataGate: datos base; PM, reportes y liquidez tienen filtros propios", dark, color.orange)
+        f_cell(diagnostics, 0, footer + 11, "Historial cargado | Casi no es candidato | No mide rentabilidad", dark, color.orange)
+        f_cell(diagnostics, 0, footer + 12, "Premarket " + premarketMode + " | " + (pmReady ? "OK" : "Sin datos disponibles de premarket hoy"), dark, pmReady ? color.silver : color.orange)
+        f_cell(diagnostics, 0, footer + 13, "Reportes: " + earningsPanel + " | " + earningsCoveragePanel, dark, color.silver)
+        f_cell(diagnostics, 0, footer + 14, "Liquidez: " + liquidityPanel, dark, color.silver)
+        f_cell(diagnostics, 0, footer + 15, "Fechas/noticias NY y ajustes: RECREAR ALERTAS al modificar", dark, color.orange)
+    else
+        int pendingCalls = pendingDirection == 1 ? 1 : 0
+        int pendingPuts = pendingDirection == -1 ? 1 : 0
+        int registeredCalls = array.get(funnelLong, 0)
+        int registeredPuts = array.get(funnelShort, 0)
+        int closedCalls = registeredCalls - pendingCalls
+        int closedPuts = registeredPuts - pendingPuts
+        int settledCalls = 0
+        int settledPuts = 0
+        for i = 3 to 7
+            settledCalls += array.get(funnelLong, i)
+            settledPuts += array.get(funnelShort, i)
+        bool identityCalls = registeredCalls == settledCalls + pendingCalls
+        bool identityPuts = registeredPuts == settledPuts + pendingPuts
+        array<string> funnelLabels = array.from("0 Registradas", "1 Toque/retest en plazo", "2 Setup confirmado/evaluado", "3 Emitidas desde ruptura", "4 Fallo del nivel", "5 Plazo agotado", "6 Descartada por sistema", "7 Fin/cambio de sesion")
+        f_cell(diagnostics, 0, 3, "Etapa / salida unica", dim, white)
+        f_cell(diagnostics, 1, 3, "CALL n", dim, white)
+        f_cell(diagnostics, 2, 3, "CALL %", dim, white)
+        f_cell(diagnostics, 3, 3, "PUT n", dim, white)
+        f_cell(diagnostics, 4, 3, "PUT %", dim, white)
+        f_cell(diagnostics, 5, 3, "Base C", dim, white)
+        f_cell(diagnostics, 6, 3, "Base P", dim, white)
+        f_cell(diagnostics, 7, 3, "Denominador", dim, white)
+        for i = 0 to 7
+            int countCalls = array.get(funnelLong, i)
+            int countPuts = array.get(funnelShort, i)
+            int baseCalls = i == 0 ? 0 : i <= 3 ? array.get(funnelLong, i - 1) : closedCalls
+            int basePuts = i == 0 ? 0 : i <= 3 ? array.get(funnelShort, i - 1) : closedPuts
+            string baseLabel = i == 0 ? "Sin %" : i <= 3 ? "Etapa previa" : "R-pendiente"
+            f_cell(diagnostics, 0, i + 4, array.get(funnelLabels, i), dark, white)
+            f_cell(diagnostics, 1, i + 4, str.tostring(countCalls), dark, color.silver)
+            f_cell(diagnostics, 2, i + 4, i == 0 ? "-" : f_rate(countCalls, baseCalls), dark, color.silver)
+            f_cell(diagnostics, 3, i + 4, str.tostring(countPuts), dark, color.silver)
+            f_cell(diagnostics, 4, i + 4, i == 0 ? "-" : f_rate(countPuts, basePuts), dark, color.silver)
+            f_cell(diagnostics, 5, i + 4, i == 0 ? "-" : str.tostring(baseCalls), dark, color.silver)
+            f_cell(diagnostics, 6, i + 4, i == 0 ? "-" : str.tostring(basePuts), dark, color.silver)
+            f_cell(diagnostics, 7, i + 4, baseLabel, dark, color.silver)
+        f_cell(diagnostics, 0, 12, "Pendientes C/P " + str.tostring(pendingCalls) + "/" + str.tostring(pendingPuts) + " | ID " + (na(pendingId) ? "ninguno" : str.tostring(pendingId)) + " | Cerradas C/P " + str.tostring(closedCalls) + "/" + str.tostring(closedPuts), dark, color.silver)
+        f_cell(diagnostics, 0, 13, "Control R=emitidas+descartadas+pendientes | CALL " + str.tostring(registeredCalls) + "=" + str.tostring(settledCalls + pendingCalls) + " " + (identityCalls ? "OK" : "ERROR") + " | PUT " + str.tostring(registeredPuts) + "=" + str.tostring(settledPuts + pendingPuts) + " " + (identityPuts ? "OK" : "ERROR"), dark, identityCalls and identityPuts ? good : bad)
+        f_cell(diagnostics, 0, 14, "Candidatos por rechazo (separados del embudo): C/P " + str.tostring(diagnosticRejectionCalls) + "/" + str.tostring(diagnosticRejectionPuts), dark, color.silver)
+        f_cell(diagnostics, 0, 15, "Bloqueo especifico", dim, white)
+        f_cell(diagnostics, 1, 15, "Dias n", dim, white)
+        f_cell(diagnostics, 2, 15, "%dias", dim, white)
+        f_cell(diagnostics, 3, 15, "Velas n", dim, white)
+        f_cell(diagnostics, 4, 15, "%N", dim, white)
+        f_cell(diagnostics, 5, 15, "Bases: dias de muestra / N horario", dim, white)
+        for i = 0 to 7
+            int daysBlocked = array.get(blockDays, i)
+            int barsBlocked = array.get(blockBars, i)
+            f_cell(diagnostics, 0, i + 16, array.get(blockNames, i), dark, white)
+            f_cell(diagnostics, 1, i + 16, str.tostring(daysBlocked), dark, color.silver)
+            f_cell(diagnostics, 2, i + 16, f_rate(daysBlocked, diagnosticObservedDays), dark, color.silver)
+            f_cell(diagnostics, 3, i + 16, str.tostring(barsBlocked), dark, color.silver)
+            f_cell(diagnostics, 4, i + 16, f_rate(barsBlocked, diagnosticBars), dark, color.silver)
+            f_cell(diagnostics, 5, i + 16, "D=" + str.tostring(diagnosticObservedDays) + " | N=" + str.tostring(diagnosticBars), dark, color.silver)
+        f_cell(diagnostics, 0, 24, "Candidatos totales: C/P " + str.tostring(diagnosticCalls) + "/" + str.tostring(diagnosticPuts) + " | Casi (velas) C/P " + str.tostring(diagnosticNearCalls) + "/" + str.tostring(diagnosticNearPuts), dark, white)
+        f_cell(diagnostics, 0, 25, "Dias con N=" + str.tostring(diagnosticObservedDays) + " | dias con apertura=" + str.tostring(diagnosticSessionDays) + " | sin PM=" + str.tostring(diagnosticNoPMDays) + " (" + f_rate(diagnosticNoPMDays, diagnosticSessionDays) + " de aperturas)", dark, color.silver)
+        f_cell(diagnostics, 0, 26, sampleLabel, dark, color.silver)
+        f_cell(diagnostics, 0, 27, "Bloqueos: dias/D y velas/N. Pueden coincidir; NO sumar motivos", dark, color.orange)
+        f_cell(diagnostics, 0, 28, "Etapas 1-3: % etapa previa. Salidas 4-7: % cerradas=R-pendientes", dark, color.orange)
+        f_cell(diagnostics, 0, 29, "Una ruptura = un ID; una sola salida. Pendiente no es candidato", dark, color.orange)
+        f_cell(diagnostics, 0, 30, noSampleLabel, dark, color.orange)
+        f_cell(diagnostics, 0, 31, "Premarket: " + premarketMode + " | " + (pmReady ? "niveles disponibles" : "Sin datos disponibles de premarket hoy"), dark, pmReady ? color.silver : color.orange)
+        f_cell(diagnostics, 0, 32, "Reportes: " + earningsPanel, dark, color.silver)
+        f_cell(diagnostics, 0, 33, "Cobertura de reportes: " + earningsCoveragePanel, dark, color.orange)
+        f_cell(diagnostics, 0, 34, "Liquidez: " + liquidityPanel + " | No valida liquidez de opciones", dark, color.silver)
+        f_cell(diagnostics, 0, 35, "Fechas/noticias NY y ajustes: RECREAR ALERTAS al modificar", dark, color.orange)
+        f_cell(diagnostics, 0, 36, "Cambiar vista para % por filtro y casi senales | No mide rentabilidad", dark, color.orange)
+        f_cell(diagnostics, 0, 37, "Embudo: solo rupturas registradas con motor habilitado; no todas las rupturas del mercado", dark, color.orange)
+if barstate.islast and not diagnosticMode
+    table.clear(diagnostics, 0, 0, 7, DIAG_ROWS - 1)
